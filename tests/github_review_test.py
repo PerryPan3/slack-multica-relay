@@ -100,6 +100,18 @@ class ApprovalTests(unittest.TestCase):
                 row = audit.execute("select ts,report from review_context").fetchone()
                 self.assertEqual(row[0],92)
                 self.assertIn("PR 已关闭",row[1])
+                self.assertIn("本次没有发起 GitHub 审批写入",row[1])
+            import base64
+            existing = {**self.record,"submitted_at":"2026-01-01T01:00:00Z"}
+            with patch.object(review,"api",return_value=[existing]) as api:
+                status = review.run_review("prepare",{"event":{**event,"messageTs":"93"},"ticket":"next"},
+                                           "team/repo",1,{"mode":"inspect","status_only":True})
+                api.assert_called_once_with("repos/team/repo/pulls/1/reviews?per_page=100",pages=True)
+            payload = json.loads(base64.urlsafe_b64decode(status["reply"].split(" ",1)[1].split(".")[0]+"==="))
+            self.assertEqual(payload["status"],"INSPECTED")
+            self.assertIsNone(payload["review"])
+            self.assertIn("本次没有发起 GitHub 审批写入",payload["text"])
+            self.assertIn("#pullrequestreview-1",payload["text"])
 
     def test_replayed_prepare_cannot_overwrite_initial_pin(self):
         latest = {**self.pr,"head":{"sha":"second"}}
@@ -126,7 +138,7 @@ class ApprovalTests(unittest.TestCase):
             with sqlite3.connect(folder/"reviews.sqlite") as audit:
                 audit.execute("create table review_context(thread text,ts real,report text)")
                 audit.execute("insert into review_context values(?,?,?)",(json.dumps(["T","C","123","team/repo",19]),124,"未确认 GitHub 审批 · abc。"))
-            self.assertEqual(slack_intent.frozen_plan("ticket","prepare",claim),{"route":"inspect","target":"team/repo/pull/19"})
+            self.assertEqual(slack_intent.frozen_plan("ticket","prepare",claim),{"route":"status","target":"team/repo/pull/19"})
 
     def test_retry_recovers_exact_review_no_second_post(self):
         with patch.object(review,"KEY",b"key"), patch.object(review,"api",side_effect=[[self.record],self.record,self.pr]) as api:

@@ -282,6 +282,9 @@ def finish(repo, number, endpoint, pr, state, ticket, output, db, history=(), po
             saved = (int(draft["id"]),)
             db.execute("insert into pending_reviews values(?,?)",(target,saved[0]))
             db.commit()
+        # A retry may adopt an existing draft for this target. Record the attempt before submitting it.
+        db.execute("update jobs set attempting=1 where id=? and attempting=0", (state,))
+        db.commit()
         review_path = endpoint + "/reviews/" + str(saved[0])
         draft = api(review_path)
         if (draft["state"] != "PENDING" or draft["commit_id"] != row[1] or
@@ -332,7 +335,35 @@ def main():
     return run_review(sys.argv[1],args,repo,number,options)
 
 
+def interrupted_report(db, state, pr, reason):
+    attempted = db.execute("select 1 from jobs where (id=? or id glob ?) and attempting=1 limit 1",
+                           (state, state + ":*")).fetchone()
+    outcome = "本次曾尝试写入，需核对 GitHub 回执。" if attempted else "本次没有发起 GitHub 审批写入。"
+    return f'未确认 GitHub 审批 · {pr["head"]["sha"][:8]}。{reason} {outcome}'
+
+
+def status_reply(repo, number, endpoint, pr, ticket, prior, started):
+    rows = api(endpoint + "/reviews?per_page=100", pages=True)
+    head = pr["head"]["sha"]
+    current = [row for row in rows if row["commit_id"] == head and row["user"]["login"].lower() == LOGIN.lower()
+               and row["state"] in ("APPROVED","CHANGES_REQUESTED","DISMISSED")]
+    state = "已合并" if pr.get("merged_at") else ("已关闭" if pr["state"] == "closed" else "开放中")
+    lines = [f'#{number} {state}，当前提交为 {head[:8]}。']
+    if prior:
+        lines.append("同一线程上一次正式审查的记录：" + prior)
+    else:
+        lines.append("此线程里没有找到更早的正式审查记录。")
+    if current:
+        receipt = current[-1]
+        link = f"https://github.com/{repo}/pull/{number}#pullrequestreview-{int(receipt['id'])}"
+        lines.append(f"GitHub 上 {LOGIN} 对当前提交的最近记录为 {receipt['state']}（{receipt['submitted_at']}）：{link}")
+    else:
+        lines.append(f"GitHub 上没有 {LOGIN} 对当前提交的正式审批记录。")
+    return {"reply":signed_result(repo,number,pr,ticket,"\n\n".join(lines),started,"INSPECTED")}
+
+
 def run_review(stage,args,repo,number,options):
+    started = int(time.time())
     ticket = args["ticket"]
     endpoint = f"repos/{repo}/pulls/{number}"
     pr = snapshot(repo,number,read_only=stage == "prepare" or options["mode"] == "inspect")
@@ -344,6 +375,11 @@ def run_review(stage,args,repo,number,options):
         db.execute("create table if not exists review_context(thread text, ts real, report text, primary key(thread,ts))")
         previous = db.execute("select report from review_context where thread=? and ts<? order by ts desc limit 1",
                               (thread_key,float(event["messageTs"]))).fetchone()
+        if stage == "prepare" and options.get("status_only") and options["mode"] == "inspect":
+            formal = db.execute("select report from review_context where thread=? and ts<? "
+                                "and report not like '%只读复核，未投票%' order by ts desc limit 1",
+                                (thread_key,float(event["messageTs"]))).fetchone()
+            return status_reply(repo,number,endpoint,pr,ticket,formal[0] if formal else None,started)
         context = {"request_mode": options["mode"], "prior_report": previous[0] if previous else options.get("previous",""),
                    "thread_context":options.get("thread_context",[])}
         if stage == "prepare":
@@ -354,7 +390,9 @@ def run_review(stage,args,repo,number,options):
                 return {"prompt":prepare(repo,number,endpoint,pr,state,db,event["text"],context)}
             except (Stop, subprocess.TimeoutExpired) as error:
                 reason = "读取 GitHub 超时。" if isinstance(error,subprocess.TimeoutExpired) else str(error)
-                report = f'未确认 GitHub 审批 · {pr["head"]["sha"][:8]}。{reason}'
+                report = interrupted_report(db,state,pr,reason)
+                if options["mode"] == "inspect":
+                    report = "只读复核，未投票 · " + report
                 db.execute("insert or replace into review_context values(?,?,?)",
                            (thread_key,float(event["messageTs"]),report[:2000]))
                 return {"reply":signed_result(repo,number,pr,ticket,report,started,"INCOMPLETE")}
@@ -423,7 +461,9 @@ def complete_review(args,repo,number,endpoint,pr,state,ticket,db,context,thread_
         report = f'{pr["head"]["sha"][:8]} {label}\n{answer["summary"]}\n{answer["details"]}'
     except (Stop,evidence.Unavailable,subprocess.TimeoutExpired) as error:
         reason = "审查进程超时。" if isinstance(error,subprocess.TimeoutExpired) else str(error)
-        report = f'未确认 GitHub 审批 · {pr["head"]["sha"][:8]}。{reason}'
+        report = interrupted_report(db,state,pr,reason)
+        if context["request_mode"] == "inspect":
+            report = "只读复核，未投票 · " + report
         reply = signed_result(repo,number,pr,ticket,"本轮未确认 GitHub 审批\n\n"+reason,started,
                               "INCOMPLETE",history=history,policy=policy,prior_calls=prior_calls)
     db.execute("insert or replace into review_context values(?,?,?)",
