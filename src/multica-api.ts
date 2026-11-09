@@ -1,4 +1,5 @@
 export interface MulticaIssue {
+  identifier?: string;
   id: string;
   title: string;
   description?: string | null;
@@ -252,6 +253,9 @@ export async function createComment(
 }
 
 export interface IssueRun {
+  usage?: { model?: unknown }[];
+  trigger_comment_id?: string | null;
+  result?: { output?: unknown } | null;
   id: string;
   issue_id: string;
   workspace_id: string;

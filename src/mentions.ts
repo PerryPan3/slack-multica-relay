@@ -28,6 +28,8 @@ export function isSupportedMessage(event: SlackMessageEvent): boolean {
     && typeof event.channel === 'string'
     && typeof event.ts === 'string'
     && typeof event.text === 'string'
+    && !event.app_id
+    && !event.bot_profile
     && !event.bot_id
     && !['bot_message', 'message_changed', 'message_deleted'].includes(subtype ?? '');
 }
@@ -44,6 +46,7 @@ export interface SlackMessageEvent {
   subtype?: unknown;
   bot_id?: unknown;
   app_id?: unknown;
+  bot_profile?: unknown;
   files?: unknown;
 }
 

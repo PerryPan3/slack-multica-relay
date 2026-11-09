@@ -363,11 +363,13 @@ def status_reply(repo, number, endpoint, pr, ticket, prior, started):
 
 
 def run_review(stage,args,repo,number,options):
+    global GH_CALLS
+    GH_CALLS = 0
     started = int(time.time())
     ticket = args["ticket"]
     endpoint = f"repos/{repo}/pulls/{number}"
     pr = snapshot(repo,number,read_only=stage == "prepare" or options["mode"] == "inspect")
-    state = hashlib.sha256(ticket.encode()).hexdigest()
+    state = hashlib.sha256((ticket + options.get("job_scope","")).encode()).hexdigest()
     with sqlite3.connect(ROOT/"reviews.sqlite",timeout=15) as db:
         db.execute("create table if not exists jobs(id text primary key,base text,head text,started integer,attempting integer default 0)")
         event = args["event"]

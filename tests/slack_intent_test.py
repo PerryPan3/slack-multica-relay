@@ -36,7 +36,7 @@ class RoutingTests(unittest.TestCase):
 
     def test_model_cannot_grant_local_or_select_unseen_target(self):
         self.assertEqual(route.select(self.c,{"route":"local"})["route"],"unsupported")
-        for targets in [[],[self.target,"other/repo/pull/18"]]:
+        for targets in [[]]:
             self.assertEqual(route.select({**self.c,"targets":targets},{"route":"review","target":self.target})["route"],"clarify")
         self.assertEqual(route.select(self.c,{"route":"review","target":"other/repo/pull/1"})["route"],"clarify")
         self.assertEqual(route.select({**self.c,"review":False},{"route":"review","target":self.target})["route"],"unsupported")
@@ -58,3 +58,27 @@ class RoutingTests(unittest.TestCase):
 
     def test_empty_commitment_is_not_a_chat_answer(self):
         self.assertEqual(route.select(self.c,{"route":"answer","answer":"收到，我马上处理。"})["route"],"clarify")
+
+    def test_explicit_batch_keeps_all_selected_targets(self):
+        targets=[self.target,"team/repo/pull/20"]
+        c={**self.c,"targets":targets}
+        self.assertEqual(route.select(c,{"route":"review","targets":targets}),{"route":"review","targets":targets})
+        self.assertEqual(route.select(c,{"route":"review","targets":[]})["route"],"clarify")
+        self.assertEqual(route.select(c,{"route":"review","targets":["evil/repo/pull/9"]})["route"],"clarify")
+
+    def test_batch_continues_after_failure_and_replay_does_not_vote_twice(self):
+        calls=[]
+        targets=[self.target,"team/repo/pull/20"]
+        def review(stage,args,repo,num,options):
+            calls.append(num)
+            self.assertEqual(options["job_scope"],f"{repo}/pull/{num}")
+            if num==19: raise OSError("unavailable")
+            return {"reply":"completed"}
+        with tempfile.TemporaryDirectory() as folder, patch.object(route.review_evidence,"PRIVATE",Path(folder)):
+            (Path(folder)/"review").mkdir()
+            plan={"route":"review","targets":targets}
+            one=route.batch_review(self.args,self.c,self.key,plan,review)
+            two=route.batch_review(self.args,self.c,self.key,plan,review)
+            self.assertEqual(calls,[19,20])
+            self.assertTrue(one["reply"].startswith("relay-agent/1 "))
+            self.assertTrue(two["reply"].startswith("relay-agent/1 "))

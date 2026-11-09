@@ -63,6 +63,27 @@ describe("durable admission", () => {
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({action:"rejected",error:code,retryable:false});
   });
+  it("verifies the signed Slack challenge before the task backend is configured", async () => {
+    const body = JSON.stringify({ type: "url_verification", challenge: "slack-test" });
+    const timestamp = String(Math.floor(Date.now() / 1000));
+    const signed = new Request("https://relay.test/api/slack/events", {
+      method: "POST",
+      headers: {
+        "x-slack-request-timestamp": timestamp,
+        "x-slack-signature": "v0=" + createHmac("sha256", env.SLACK_SIGNING_SECRET)
+          .update(`v0:${timestamp}:${body}`).digest("hex"),
+      },
+      body,
+    });
+    const settings = { SLACK_SIGNING_SECRET: env.SLACK_SIGNING_SECRET };
+    const publish = vi.fn<typeof fetch>();
+    const wrong = signed.clone();
+    wrong.headers.delete("x-slack-signature");
+    expect((await acceptSlack(wrong, settings, publish)).status).toBe(401);
+    expect(await (await acceptSlack(signed, settings, publish)).json()).toEqual({ challenge: "slack-test" });
+    expect((await acceptSlack(request(event), settings, publish)).status).toBe(500);
+    expect(publish).not.toHaveBeenCalled();
+  });
   it("keeps transient consumer failures retryable",async()=>{
     expect(consumerFailure("timeout").status).toBe(503);
   });
@@ -113,11 +134,24 @@ describe("durable admission", () => {
     { user: undefined },
     { text: "ordinary", thread_ts: "1.000001" },
     { bot_id: "B1" },
+    { app_id: "A1" },
+    { bot_profile: { id: "B1" } },
     { subtype: "message_changed" },
   ])("no queue side effects for %j", async (change) => {
     const fetcher = vi.fn<typeof fetch>();
     await acceptSlack(request({ ...event, ...change }), env, fetcher);
     expect(fetcher).not.toHaveBeenCalled();
+  });
+  it.each([
+    ["DSELF", "U1", true],
+    ["COTHER", "U1", false],
+    ["DSELF", "U2", false],
+  ] as const)("checks self-DM channel %s and sender %s", async (channel, user, allowed) => {
+    const settings = { ...env, SLACK_ALLOWED_CHANNEL_IDS: "DSELF", SLACK_ALLOWED_SENDER_IDS: "U1" };
+    const publish = vi.fn<typeof fetch>().mockResolvedValue(Response.json({ messageId: "msg" }));
+    const response = await acceptSlack(request({ ...event, channel, user }), settings, publish);
+    expect((await response.json()).action).toBe(allowed ? "accepted" : "ignored");
+    expect(publish).toHaveBeenCalledTimes(allowed ? 1 : 0);
   });
   it("rejects another Slack team", async () => {
     const f = vi.fn<typeof fetch>();
@@ -287,5 +321,25 @@ describe("取消指令的事件路由", () => {
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ action: "ignored" });
     expect(calls.every((url) => url === env.KV_REST_API_URL || url.includes("/api/issues/search?"))).toBe(true);
+  });
+});
+
+describe("owner self-assignment outside explicitly granted channels", () => {
+  const settings = {...env, SLACK_SELF_ASSIGN_SCOPE:"all", SLACK_ALLOWED_SENDER_IDS:"U1", SLACK_CHANNEL_SENDER_GRANTS:"C1:U2"};
+  it.each([
+    ["D9","U1",true], ["G9","U1",true], ["C9","U1",true], ["C1","U2",true],
+    ["D9","U2",false], ["G9","U2",false], ["C9","U2",false], ["C1","U9",false],
+  ])("enforces the sender for %s / %s", async (channel,user,allowed) => {
+    const publish = vi.fn<typeof fetch>().mockResolvedValue(Response.json({messageId:"test"}));
+    await acceptSlack(request({...event,channel,user}),settings,publish);
+    expect(publish).toHaveBeenCalledTimes(allowed ? 1 : 0);
+  });
+  it("requires an actual self-mention and honors exclusions",async () => {
+    const publish = vi.fn<typeof fetch>();
+    await acceptSlack(request({...event,channel:"C9",user:"U1",text:"Perry test"}),settings,publish);
+    await acceptSlack(request({...event,channel:"C9",user:"U1"}),{...settings,SLACK_BLOCKED_CHANNEL_IDS:"C9"},publish);
+    await acceptSlack(request({...event,channel:"C9",user:"U1"},"T9"),settings,publish);
+    await acceptSlack(request({...event,channel:"C9",user:"U1"}),{...settings,SLACK_SELF_ASSIGN_SCOPE:"dm"},publish);
+    expect(publish).not.toHaveBeenCalled();
   });
 });

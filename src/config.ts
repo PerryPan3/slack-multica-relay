@@ -6,6 +6,7 @@ export interface RelayConfig {
   cancelKeywords: Set<string>;
   allowedChannelIds: Set<string>;
   allowAllChannels: boolean;
+  selfAssignScope?: "dm" | "all";
   blockedChannelIds: Set<string>;
   allowedSenderIds: Set<string>;
   allowAllSenders: boolean;
@@ -42,6 +43,7 @@ export function loadRelayConfig(
     teamId: required(env, "SLACK_TEAM_ID"),
     allowedChannelIds: allowedChannels.ids,
     allowAllChannels: allowedChannels.all,
+    selfAssignScope: env.SLACK_SELF_ASSIGN_SCOPE === "all" || env.SLACK_SELF_ASSIGN_SCOPE === "dm" ? env.SLACK_SELF_ASSIGN_SCOPE : undefined,
     blockedChannelIds,
     allowedSenderIds: allowedSenders.ids,
     allowAllSenders: allowedSenders.all,
