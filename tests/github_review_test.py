@@ -13,6 +13,12 @@ spec.loader.exec_module(review)
 
 
 class ApprovalTests(unittest.TestCase):
+    def test_missing_resource_does_not_claim_missing_repository_permission(self):
+        from types import SimpleNamespace
+        with patch.object(review,"GH","gh"), patch.object(review.subprocess,"run",return_value=SimpleNamespace(returncode=1,stderr="HTTP 404",stdout="")):
+            with self.assertRaisesRegex(review.Stop,"不能仅凭此认定仓库无权限"):
+                review.api("repos/team/repo/contents/AGENTS.md")
+
     def setUp(self):
         identity = patch.object(review,"LOGIN","test-reviewer")
         identity.start()

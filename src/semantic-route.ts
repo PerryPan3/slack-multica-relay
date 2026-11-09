@@ -1,10 +1,11 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { isOwnerSelfMention } from "./owner-local.js";
+import { isCancelCommand } from "./mentions.js";
 import { targetsIn } from "./github-review.js";
 import type { ThreadContext } from "./context-envelope.js";
 import type { SlackThreadEvent } from "./thread-router.js";
 
-interface Scope {team:string; owner?:string; reviewChannel?:string; selfChannel?:string; localEnabled:boolean; businessChannel?:string; businessSenders?:string; businessTestDm?:string; key?:string}
+interface Scope {cancelKeywords?:ReadonlySet<string>;team:string; owner?:string; reviewChannel?:string; selfChannel?:string; localEnabled:boolean; businessChannel?:string; businessSenders?:string; businessTestDm?:string; key?:string}
 export interface BusinessScope {businessChannel?:string; businessSenders?:string; businessTestDm?:string}
 export function businessAllowed(event:SlackThreadEvent, scope:BusinessScope, owner:string|undefined, team:string) {
   if (!scope.businessChannel || !owner || event.teamId!==team || event.mention.type!=="user" || event.mention.id!==owner) return false;
@@ -27,9 +28,12 @@ export function routeTicket(event:SlackThreadEvent, context:ThreadContext, scope
   const found = [...new Set(thread.flatMap(m => targetsIn(m.text)))];
   const targets = direct.length ? direct : found;
   const history = thread.map(m=>({author:m.authorId,text:m.text}));
+  const cancellations = thread.filter(m=>m.authorId===scope.owner && isCancelCommand(m.text,
+    new Set([scope.owner!]),new Set(),scope.cancelKeywords ?? new Set(["cancel","取消"])))
+    .map(m=>({author:m.authorId,ts:m.ts}));
   const partial = false;
   const binding = [event.teamId,event.channelId,event.threadTs,event.messageTs,event.senderUserId,event.mention.id,event.text];
-  const payload = {binding,review,local,business,history,targets,overflow:false,
+  const payload = {binding,review,local,business,history,targets,cancellations,overflow:false,
     partial};
   const body=Buffer.from(JSON.stringify(payload)).toString("base64url");
   return "intent1."+body+"."+createHmac("sha256",scope.key).update("intent/1:"+body).digest("hex");

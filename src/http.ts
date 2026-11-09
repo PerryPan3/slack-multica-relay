@@ -368,7 +368,7 @@ export async function consumeQueue(
           const taskTicket = routeTicket(event,context,{
             team:config.teamId, owner:config.allowedSenderIds.size === 1 ? [...config.allowedSenderIds][0] : undefined,
             reviewChannel:env.GITHUB_REVIEW_CHANNEL, selfChannel:env.GITHUB_REVIEW_SELF_CHANNEL,
-            localEnabled:env.OWNER_LOCAL_TASKS === "true", businessChannel:env.BUSINESS_CHANNEL,
+            cancelKeywords:config.cancelKeywords, localEnabled:env.OWNER_LOCAL_TASKS === "true", businessChannel:env.BUSINESS_CHANNEL,
             businessSenders:env.BUSINESS_SENDERS, businessTestDm:env.BUSINESS_TEST_DM, key:env.GITHUB_REVIEW_SIGNING_KEY,
           });
           return taskTicket ? { ...context, githubReviewTicket: taskTicket } : context;

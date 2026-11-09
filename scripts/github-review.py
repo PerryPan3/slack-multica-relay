@@ -82,7 +82,9 @@ def api(path, *, pages=False, diff=False, write=None):
         if not result.returncode:
             break
         status = re.search(r"HTTP (\d{3})", result.stderr)
-        if status and status[1] in ("401","403","404","422"):
+        if status and status[1] == "404":
+            raise Stop("GitHub 未找到请求资源（HTTP 404）。可能是文件或 API 路径不存在，不能仅凭此认定仓库无权限。")
+        if status and status[1] in ("401","403","422"):
             raise Stop("GitHub 拒绝了这次请求（HTTP " + status[1] + "），请核对仓库访问和审查权限。")
         if write is not None or attempt == 2:
             category = next((word for word in ("timeout","EOF","reset","TLS","GraphQL") if word.lower() in result.stderr.lower()), "transport")

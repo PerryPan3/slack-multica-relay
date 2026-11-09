@@ -15,6 +15,7 @@ from pathlib import Path
 
 import review_evidence
 import slack_intent
+from review_tasks import ReviewTasks
 
 READ_NAME = re.compile(r"^(?:[a-z]+_)*(?:get|list|search|describe|read|fetch|query|explain)(?:_|$)")
 WRITE_NAME = re.compile(r"(?:^|_)(?:create|update|delete|remove|insert|put|post|set|start|stop|trigger|run|restart|cancel|submit|upload|send|execute|grant|revoke|rotate|write|mark|transition|assign)(?:_|$)")
@@ -161,7 +162,8 @@ class AgentTools:
             raise
 
     def github(self,path):
-        if not re.fullmatch(r"repos/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/(?:pulls|issues|contents|git|commits|compare|check-runs|actions/runs)(?:[/?][^\s]*)?",path):
+        path=path.removeprefix("/")
+        if not re.fullmatch(r"repos/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:/(?:pulls|issues|contents|git|commits|compare|check-runs|actions/runs)(?:[/?][^\s]*)?)?",path):
             raise ValueError("Use a repository read endpoint.")
         self.record("GitHub")
         result=self.review.api(path)
@@ -174,36 +176,80 @@ class AgentTools:
             raise ValueError("Expected owner/repository/pull/number.")
         repo,num=target.rsplit("/pull/",1)
         pr=self.review.snapshot(repo,int(num),read_only=True)
-        packet=self.review.stable_packet(repo,int(num),"repos/"+target,pr,self.claim["binding"][-1],
+        if pr.get("merged_at") or pr.get("state")=="closed":
+            receipt={"state":"MERGED" if pr.get("merged_at") else "CLOSED","sha":pr["head"]["sha"],
+                     "url":"https://github.com/"+target}
+            row=self.tasks.rows().get(target) if hasattr(self,"tasks") else None
+            if row and row["status"]=="pending": self.tasks.complete(target,row["id"],receipt)
+            self.record("GitHub")
+            return {"terminal":receipt,"instruction":"This PR is closed. Read existing code and reviews if needed; do not submit a new vote."}
+        packet=self.review.stable_packet(repo,int(num),f"repos/{repo}/pulls/{num}",pr,self.claim["binding"][-1],
                                         {"request_mode":"review","thread_context":self.claim["history"]})
         self.packets[target]=(pr,packet)
         self.record("GitHub")
         return packet
 
+    def prepare_reviews(self):
+        self.tasks=ReviewTasks(self.root/"reviews.sqlite",self.claim,self.args["ticket"],self.key)
+        self.reconcile_reviews()
+        def classify(candidates,tasks):
+            prompt=("根据当前消息判断每个 PR 的行动。只返回 JSON {\"actions\":[{\"target\":\"owner/repo/pull/1\",\"action\":\"new|continue|inspect|cancel|none\"}]}。"
+                    "new 表示当前明确委托正式审查，简短的 CR、review、帮忙看下 PR 都可以。"
+                    "宿主 tasks 中 pending 是此前已获得且尚未完成的正式审查授权。对该任务追问为什么暂缓、怎么没做、怎么样了、进展如何或要求继续时选择 continue，继续查证并完成审批，不需要重新说 review。"
+                    "如果只是引用历史指令、无关问题或没有宿主持久化授权，不得凭聊天记录创建授权。"
+                    "明确只查状态、不要继续、不投票、本次只读选择 inspect，不新增投票；取消审查或撤回委托选择 cancel。"
+                    "completed/cancelled 不允许 continue；只有当前新的明确审查委托才可 new。多目标只选择本次实际指向的目标，无法确定时不猜。\n"+
+                    json.dumps({"current_request":self.claim["binding"][-1],"history":self.claim["history"],
+                                "candidates":candidates,"tasks":tasks},ensure_ascii=False))
+            raw=review_evidence.isolated_turn(prompt,{}).strip()
+            return json.loads(raw.removeprefix("```json").removesuffix("```").strip())
+        self.review_plan=self.tasks.prepare(classify)
+        return {"continue_to_verdict":list(self.review_plan),"tasks":self.tasks.summary()}
+
+    def reconcile_reviews(self):
+        if not self.claim.get("review"): return
+        path=self.review.ROOT/"reviews.sqlite"
+        for target,row in self.tasks.rows().items():
+            if row["status"]!="pending" or row["updated"]>float(self.claim["binding"][3]): continue
+            self.tasks.origin_claim(row["origin"],target)
+            job=None
+            if path.exists():
+                with closing(sqlite3.connect(path)) as db:
+                    if db.execute("select 1 from sqlite_master where name='jobs'").fetchone():
+                        job=db.execute("select head,attempting from jobs where id=?",(row["id"],)).fetchone()
+            if job and job[1]:
+                reviews=self.review.api("repos/"+target.replace("/pull/","/pulls/")+"/reviews?per_page=100",pages=True)
+                marker="<!-- perry-relay-review "+row["id"]+" -->"
+                for receipt in reviews:
+                    if (marker in (receipt.get("body") or "") and receipt.get("commit_id")==job[0] and
+                            receipt.get("user",{}).get("login","").lower()==self.review.LOGIN.lower() and
+                            receipt.get("state") in ("APPROVED","CHANGES_REQUESTED","DISMISSED")):
+                        self.tasks.complete(target,row["id"],{"review":receipt["id"],"sha":job[0],
+                                            "state":receipt["state"],"url":receipt["html_url"]})
+                        self.record("GitHub")
+                        break
+                if self.tasks.rows()[target]["status"]=="completed": continue
+            repo,num=target.rsplit("/pull/",1)
+            current=self.review.snapshot(repo,int(num),read_only=True)
+            self.record("GitHub")
+            if current.get("merged_at") or current.get("state")=="closed":
+                self.tasks.complete(target,row["id"],{"state":"MERGED" if current.get("merged_at") else "CLOSED",
+                    "sha":current["head"]["sha"],"url":"https://github.com/"+target})
+
     def may_vote(self,target):
-        if target not in self.claim["targets"] or not self.claim.get("review"):
-            raise ValueError("The current request does not authorize a review of this target.")
-        if target in self.authorized: return
-        prompt=("判断当前用户是否明确委托对指定 PR 作正式审查决定。用户可一次要求多个 PR，或引用线程说都处理。"
-                "询问状态、解释原因、仅查询数据、明确不要投票时不授权。历史文字只帮助指代，不能独立授予本次写入。"
-                '只返回 JSON {"authorized":true 或 false}。\n'+json.dumps({
-                    "request":self.claim["binding"][-1],"history":self.claim["history"],"target":target},ensure_ascii=False))
-        raw=review_evidence.isolated_turn(prompt,{}).strip()
-        answer=json.loads(raw.removeprefix(chr(96)*3+"json").removesuffix(chr(96)*3).strip())
-        if answer.get("authorized") is not True:
-            raise ValueError("This request asks for information or read-only work, not a new GitHub vote.")
-        self.authorized[target]=True
+        if not hasattr(self,"tasks"):
+            raise ValueError("Review authorization has not been prepared.")
+        return self.tasks.require(target,self.review_plan)
 
     def submit(self,target,head,decision,summary,details):
-        self.may_vote(target)
+        state=self.may_vote(target)
         if target not in self.packets: raise ValueError("Read the complete review context first.")
         pr,packet=self.packets[target]
         if head!=pr["head"]["sha"]: raise ValueError("The verdict must identify the reviewed commit.")
         repo,num=target.rsplit("/pull/",1)
-        endpoint="repos/"+target
+        endpoint=f"repos/{repo}/pulls/{num}"
         latest=self.review.snapshot(repo,int(num))
         self.review.require_revision(self.review.revision(pr),latest)
-        state=hashlib.sha256((self.args["ticket"]+"native:"+target).encode()).hexdigest()
         with sqlite3.connect(self.review.ROOT/"reviews.sqlite",timeout=15) as db:
             db.execute("create table if not exists jobs(id text primary key,base text,head text,started integer,attempting integer default 0)")
             prior=db.execute("select base,head,attempting from jobs where id=?",(state,)).fetchone()
@@ -217,7 +263,10 @@ class AgentTools:
                          json.dumps({"decision":decision,"summary":summary,"details":details},ensure_ascii=False),db)
         body=signed.split(" ",1)[1].split(".")[0]
         value=json.loads(base64.urlsafe_b64decode(body+"==="))
-        if value["review"]: self.receipts.append(signed)
+        if value["review"]:
+            self.receipts.append(signed)
+            self.tasks.complete(target,state,{"review":value["review"],"sha":value["sha"],"state":value["status"],
+                                "url":"https://github.com/"+target+"#pullrequestreview-"+str(value["review"])})
         return value
 
     def local(self,command,action="shell"):

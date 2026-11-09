@@ -36,3 +36,14 @@ it("grants business reads only to the named colleagues in the designated channel
   expect(permissions("PERRY","D9").business).toBe(false);
   expect(permissions("KEVEN","C2","T2")).toBeUndefined();
 });
+
+
+it("carries only authenticated owner cancellation events from the same thread",()=>{
+  const input={timeline:{messages:[{ts:"10.1",authorId:"KEVEN",text:"https://github.com/team/repo/pull/19",
+    replies:{messages:[{ts:"11.1",authorId:"PERRY",text:"<@PERRY> 取消"},
+      {ts:"12.1",authorId:"OTHER",text:"<@PERRY> 取消"},
+      {ts:"13.1",authorId:"PERRY",text:"引用：<@PERRY> 取消"}]}}]}} as ThreadContext;
+  const ticket=routeTicket(e,input,scope)!;
+  expect(JSON.parse(Buffer.from(ticket.split(".")[1],"base64url").toString()).cancellations)
+    .toEqual([{author:"PERRY",ts:"11.1"}]);
+});
