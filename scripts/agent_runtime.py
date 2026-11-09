@@ -114,7 +114,7 @@ def build_server(operations,audit_path):
                 f.write(json.dumps({"at":time.time(),"tool":label,"phase":"finished","ok":ok})+"\n")
 
     @server.tool(annotations=ToolAnnotations(read_only_hint=True, destructive_hint=False, open_world_hint=False))
-    async def discover_tools(service:str)->list[dict]:
+    async def discover_tools(service:str)->list[dict]|dict:
         """List currently registered read tools and their real parameter schemas for a service."""
         return await invoke("discover:"+service,operations.discover,service)
 

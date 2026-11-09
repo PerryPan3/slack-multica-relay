@@ -8,6 +8,45 @@ sys.path.insert(0,str(Path(__file__).resolve().parents[1]/"scripts"))
 from agent_tools import readonly_sql, allowed_tool, AgentTools
 
 class NativeToolsTests(unittest.TestCase):
+    def test_stdio_launcher_finds_sibling_executable_with_daemon_path(self):
+        import asyncio,os,subprocess
+        from contextlib import asynccontextmanager
+        from unittest.mock import AsyncMock,Mock
+        with tempfile.TemporaryDirectory() as temp:
+            folder=Path(temp)
+            (folder/'helper').write_text('#!/bin/sh\nexit 0\n')
+            (folder/'helper').chmod(0o700)
+            agent=AgentTools.__new__(AgentTools)
+            agent.connections={'fixture':{'command':str(folder/'launcher'),'env':{'PATH':str(folder)}}}
+            agent.claim={'local':True};agent.catalog={}
+            @asynccontextmanager
+            async def transport(params,**kwargs):
+                subprocess.run(['/usr/bin/env','helper'],env=params.env,check=True,capture_output=True)
+                yield (None,None)
+            session=AsyncMock()
+            session.list_tools.return_value=Mock(model_dump=Mock(return_value={'tools':[]}))
+            session.__aenter__.return_value=session
+            with patch.dict(os.environ,{'PATH':'/usr/bin:/bin'}), \
+                 patch('mcp.client.stdio.stdio_client',transport),patch('mcp.ClientSession',return_value=session):
+                self.assertEqual(asyncio.run(agent.discover('fixture')),[])
+            # Absolute launchers must also supply their directory for env shebangs.
+            agent.connections['fixture'].pop('env')
+            with patch.dict(os.environ,{'PATH':'/usr/bin:/bin'}), \
+                 patch('mcp.client.stdio.stdio_client',transport),patch('mcp.ClientSession',return_value=session):
+                self.assertEqual(asyncio.run(agent.discover('fixture')),[])
+
+    def test_discovery_error_survives_mcp_result_validation(self):
+        import asyncio,json
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+        from agent_runtime import build_server
+        with tempfile.TemporaryDirectory() as temp:
+            server=build_server(SimpleNamespace(claim={},discover=AsyncMock(side_effect=RuntimeError('connection closed'))),Path(temp)/'audit')
+            result=asyncio.run(server.call_tool('discover_tools',{'service':'fixture'}))
+            value=result.model_dump(mode='json',by_alias=True)
+            self.assertIn('connection closed',json.dumps(value))
+            self.assertNotIn('Error executing tool',json.dumps(value))
+
     def test_failed_old_pr_does_not_block_other_reviews_or_business_work(self):
         from types import SimpleNamespace
         from unittest.mock import Mock

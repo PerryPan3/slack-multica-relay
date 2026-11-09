@@ -113,7 +113,13 @@ class AgentTools:
         if "command" in cfg:
             env={k:os.environ[k] for k in cfg.get("env_vars",[]) if k in os.environ}
             env.update(cfg.get("env",{}))
-            env.update({"HOME":str(Path.home()),"PATH":os.environ.get("PATH","/usr/bin:/bin")})
+            env["HOME"]=str(Path.home())
+            # Background daemons may omit the directory needed by env shebangs.
+            if not env.get("PATH"):
+                command=Path(cfg["command"])
+                paths=([str(command.parent)] if command.is_absolute() else [])
+                paths.extend(os.environ.get("PATH","/usr/bin:/bin").split(os.pathsep))
+                env["PATH"]=os.pathsep.join(dict.fromkeys(p for p in paths if p))
             if "redshift" in server: env["REDSHIFT_ALLOW_WRITE"]="false"
             params=StdioServerParameters(command=cfg["command"],args=cfg.get("args",[]),cwd=cfg.get("cwd"),env=env)
             with open(os.devnull,"w") as quiet:
