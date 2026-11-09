@@ -121,3 +121,27 @@ A definite send rate limit persists `rate_limited/retryAt` and permits retry onl
 ## Build diagnostics
 
 `relay_context` records only the event digest, read/retained counts, missing-data reasons, stage timings, and envelope bytes. It excludes chat text, names, credentials, and full snapshots. Correlate it with the separate `relay_dispatch` persistence result.
+
+### Worker review footer
+
+When Worker replies are enabled, the Worker renders review bodies as section blocks and metadata as separate context rows. Signed v2 receipts carry the decision, confirmed GitHub review, repository and commit, duration, and host-recorded tool counts; v1 receipts remain readable. Incomplete reviews retain statistics, task and PR links but have no approval link. Model names come from the matched run usage and are omitted when unavailable. The issue identifier comes from the verified Issue. The final attribution row retains the unique delivery marker, and fallback text includes the same information.
+
+Marked historical messages may use mrkdwn or plain_text body and footer objects; both follow the existing footer-removal rules. Delivery ledger, source verification and post-send readback remain unchanged.
+
+
+### Multiple targets and native agent receipts
+
+Signed requests retain all PR candidates and granted capabilities from the frozen context. Explicit multiple targets are processed individually; the legacy executor caches child results so one failure does not erase another receipt. The native agent uses a persistent session for the same thread, without routing actionable requests to a text-only branch.
+
+A `relay-agent/1` receipt binds its HMAC to the request ticket and contains body text, elapsed time, host-recorded tool counts, optional host-selected model names and signed PR child receipts. The Worker verifies both layers and rejects results belonging to another request. Native body text uses Slack formatting with raw mention syntax escaped. Tools, model, task and repository links occupy separate context rows. Approval links come from verified GitHub receipts. Target validation and the at-most-once delivery ledger remain unchanged.
+
+
+### Continuing an interrupted review
+
+Before a formal review starts, the host persists its original signed request, thread, target and stable task ID. Evidence failures, interrupted tools and missing completion receipts leave the task pending. An eligible reviewer asking about a pending review in the same thread continues that delegation through fresh evidence and a final GitHub verdict; repeating the review command is unnecessary.
+
+An explicit status-only or no-vote request stays read-only for that turn. Withdrawal persists a cancellation. Owner cancel commands handled at ingress are carried in subsequent signed context so cancelled grants cannot resume. Completed or cancelled tasks require a new explicit review delegation before another vote. Quoted history, another thread and revoked review capability cannot authorize continuation.
+
+Retries retain the same GitHub write marker. An uncertain previous submission is reconciled by author, commit, marker and review state before any further write. Legacy tasks can migrate only with the original signed request, the host's formal review dispatch record and its matching unfinished record. Old reply text alone never grants authority.
+
+A merged or closed PR ends the pending delegation without claiming a new approval. Existing review links remain attributed to their actual authors.

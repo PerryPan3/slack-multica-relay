@@ -1,6 +1,7 @@
 import { createHash, createHmac } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import worker from '../src/cloudflare.js';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createTestHarness } from 'wrangler';
 
 // Inline config uses the production entry/compatibility settings without loading private dotenv files.
@@ -54,5 +55,25 @@ describe('Cloudflare workerd runtime',()=>{
     for(const [body,signature] of [['{"changed":true}',queueSignature('{}')],['{}',queueSignature('{}','https://wrong.test/api/queue/consume')]]){
       expect((await server.fetch(env.RELAY_CONSUMER_URL,{method:'POST',body,headers:{'upstash-signature':signature!}})).status).toBe(401);
     }
+  });
+});
+
+describe('scheduled Multica renewal', () => {
+  afterEach(() => { vi.unstubAllGlobals(); });
+  it.each([true, false])('accepts an authoritative renewal receipt (renewed=%s)', async renewed => {
+    const send = vi.fn().mockResolvedValue(Response.json({renewed, expires_at:'2099-01-01T00:00:00Z'}));
+    vi.stubGlobal('fetch', send);
+    await worker.scheduled({}, env);
+    const [url, options] = send.mock.calls[0];
+    expect(String(url)).toBe('https://multica.invalid/api/tokens/current/renew');
+    expect(options).toMatchObject({method:'POST', redirect:'manual', headers:{authorization:'Bearer test'}});
+  });
+  it.each([302, 401, 503])('reports an unsuccessful check (%i)', async status => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(null,{status})));
+    await expect(worker.scheduled({},env)).rejects.toThrow('multica_renewal_http_' + status);
+  });
+  it('rejects a successful HTTP response without a valid expiry', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(Response.json({renewed:true,expires_at:''})));
+    await expect(worker.scheduled({},env)).rejects.toThrow('invalid_renewal_receipt');
   });
 });

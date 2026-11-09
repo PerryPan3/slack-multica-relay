@@ -13,6 +13,24 @@ spec.loader.exec_module(review)
 
 
 class ApprovalTests(unittest.TestCase):
+    def test_review_context_includes_pr_conversation_not_only_review_submissions(self):
+        pr={"changed_files":0,"additions":0,"deletions":0,"title":"PR","body":"", "state":"open",
+            "base":{"sha":"base"},"head":{"sha":"head"}}
+        def read(path,**kwargs):
+            if kwargs.get('diff'):return ''
+            if path=='repos/team/repo/issues/19/comments?per_page=100':
+                return [{"id":9,"body":"The previous assumption was wrong","user":{"login":"author"},"html_url":"https://github.com/comment/9"}]
+            return []
+        with patch.object(review,"api",side_effect=read):
+            packet=review.collect('repos/team/repo/pulls/19',pr)
+        self.assertEqual(packet['conversation'][0]['body'],'The previous assumption was wrong')
+
+    def test_missing_resource_does_not_claim_missing_repository_permission(self):
+        from types import SimpleNamespace
+        with patch.object(review,"GH","gh"), patch.object(review.subprocess,"run",return_value=SimpleNamespace(returncode=1,stderr="HTTP 404",stdout="")):
+            with self.assertRaisesRegex(review.Stop,"不能仅凭此认定仓库无权限"):
+                review.api("repos/team/repo/contents/AGENTS.md")
+
     def setUp(self):
         identity = patch.object(review,"LOGIN","test-reviewer")
         identity.start()
@@ -144,6 +162,20 @@ class ApprovalTests(unittest.TestCase):
         with patch.object(review,"KEY",b"key"), patch.object(review,"api",side_effect=[[self.record],self.record,self.pr]) as api:
             self.assertTrue(self.finish().startswith("relay-review/2 "))
             self.assertTrue(all("write" not in call.kwargs for call in api.call_args_list))
+
+    def test_new_review_on_same_head_does_not_reuse_another_tasks_reasoning(self):
+        old={**self.record,"body":"old finding\n<!-- perry-relay-review old-task -->"}
+        self.assertIsNone(review.received([old],"<!-- perry-relay-review state -->","head","CHANGES_REQUESTED"))
+
+    def test_recovers_created_draft_after_missing_local_receipt(self):
+        self.db.execute("update jobs set attempting=1")
+        draft={**self.record,"state":"PENDING","body":"<!-- perry-relay-review state -->"}
+        with patch.object(review,"KEY",b"key"), patch.object(review,"snapshot",return_value=self.pr), \
+                patch.object(review,"api",side_effect=[[draft],draft,[],self.record,self.record,self.pr]) as api:
+            self.finish()
+            writes=[c for c in api.call_args_list if "write" in c.kwargs]
+            self.assertEqual(len(writes),1)
+            self.assertEqual(writes[0].args[0],"endpoint/reviews/1/events")
 
     def test_request_changes_is_bound_to_sha_and_read_back(self):
         draft = {**self.record,"state":"PENDING","body":""}

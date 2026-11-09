@@ -1,3 +1,5 @@
+import { routeTicket } from "./semantic-route.js";
+import { channelSenderAllowed, deliverReply, isOwnerSelfAssignment, workerReadToken, replyJob, scheduleReply } from "./worker-reply.js";
 import { Buffer } from 'node:buffer';
 import { Receiver } from "@upstash/qstash";
 import { loadRelayConfig, type RelayConfig } from "./config.js";
@@ -44,15 +46,12 @@ async function readBody(request: Request): Promise<string> {
 function record(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
 }
-function admitted(event: SlackThreadEvent, config: RelayConfig): boolean {
+function admitted(event: SlackThreadEvent, config: RelayConfig, senderGrants?: string): boolean {
   return (
     event.teamId === config.teamId &&
-    (config.allowAllChannels ||
-      config.allowedChannelIds.has(event.channelId)) &&
+    (config.allowAllChannels || config.allowedChannelIds.has(event.channelId) || isOwnerSelfAssignment(event, config)) &&
     !config.blockedChannelIds.has(event.channelId) &&
-    (config.allowAllSenders ||
-      config.allowedSenderIds.has(event.senderUserId)) &&
-    !config.blockedSenderIds.has(event.senderUserId) &&
+    channelSenderAllowed(event, config, senderGrants) &&
     !!findTargetMention(
       event.text,
       config.targetUserIds,
@@ -92,6 +91,9 @@ function reason(error: unknown): string {
   )
     return "timeout";
   const codes = [
+    "reply_queue_failed",
+    "reply_read_failed",
+    "slack_delivery_unknown",
     "body_too_large",
     "invalid_event",
     "thread_lock_busy",
@@ -148,12 +150,8 @@ export async function acceptSlack(
   const start = Date.now();
   if (request.method !== "POST")
     return json({ error: "method_not_allowed" }, 405);
-  let config: RelayConfig;
-  try {
-    config = loadRelayConfig(env);
-  } catch {
-    return json({ error: "relay_not_configured" }, 500);
-  }
+  const signingSecret = env.SLACK_SIGNING_SECRET?.trim();
+  if (!signingSecret) return json({ error: "relay_not_configured" }, 500);
   let raw: string;
   try {
     raw = await readBody(request);
@@ -165,7 +163,7 @@ export async function acceptSlack(
       raw,
       request.headers.get("x-slack-request-timestamp") ?? undefined,
       request.headers.get("x-slack-signature") ?? undefined,
-      config.signingSecret,
+      signingSecret,
     )
   ) {
     console.warn("relay_admission", {
@@ -186,6 +184,12 @@ export async function acceptSlack(
   if (!record(body)) return json({ error: "invalid_envelope" }, 400);
   if (body.type === "url_verification" && typeof body.challenge === "string")
     return json({ challenge: body.challenge });
+  let config: RelayConfig;
+  try {
+    config = loadRelayConfig(env);
+  } catch {
+    return json({ error: "relay_not_configured" }, 500);
+  }
   if (
     body.type !== "event_callback" ||
     !record(body.event) ||
@@ -215,7 +219,7 @@ export async function acceptSlack(
   } catch {
     return json({ error: "invalid_event" }, 400);
   }
-  if (!admitted(payload, config))
+  if (!admitted(payload, config, env.SLACK_CHANNEL_SENDER_GRANTS))
     return json({ action: "ignored", reason: "not_allowed" });
   payload.operation = isCancelCommand(
     payload.text,
@@ -306,11 +310,24 @@ export async function consumeQueue(
   }
   let event: SlackThreadEvent;
   try {
-    event = parsedEvent(JSON.parse(raw));
+    const payload = JSON.parse(raw);
+    if (payload?.kind === 'thread_reply') {
+      if (env.WORKER_THREAD_REPLIES !== 'true') return json({action:'ignored'});
+      try {
+        const action = await deliverReply(payload, config, (input,init)=>fetchImpl(input,init), env.SLACK_CHANNEL_READ_TOKEN, env.SLACK_CHANNEL_SENDER_GRANTS, env.GITHUB_REVIEW_SIGNING_KEY, env.GITHUB_REVIEW_WORKSPACE_SLUG,
+          {businessChannel:env.BUSINESS_CHANNEL,businessSenders:env.BUSINESS_SENDERS,businessTestDm:env.BUSINESS_TEST_DM});
+        console.info('relay_reply', {action, issueId:payload.issueId, attempt:payload.attempt});
+        return json({action});
+      } catch (error) {
+        console.warn('relay_reply', {action:'retry', reason:reason(error)});
+        return json({error:'reply_unavailable'},503);
+      }
+    }
+    event = parsedEvent(payload);
   } catch {
     return consumerFailure("invalid_event");
   }
-  if (!admitted(event, config))
+  if (!admitted(event, config, env.SLACK_CHANNEL_SENDER_GRANTS))
     return json({ action: "ignored", reason: "policy_changed" });
   // 新消息保留入队时的指令分类，配置变更不能把排队中的取消变成启动任务。
   event.operation ??= isCancelCommand(
@@ -336,13 +353,26 @@ export async function consumeQueue(
     });
   };
   try {
+    const contextToken = env.WORKER_THREAD_REPLIES === 'true'
+      ? workerReadToken(event, config, env.SLACK_CHANNEL_READ_TOKEN)
+      : config.slackContextToken;
+    if (!contextToken) return json({action:'ignored',reason:'channel_read_not_configured'});
     const result = await routeSlackThreadEvent(
       event,
       {
         ...config,
-        readContext: async (event, options) => enrichParticipantNames(event,
-          await readContext(event, config.slackContextToken, boundedFetch, options),
-          config.slackContextToken, boundedFetch),
+        readContext: async (event, options) => {
+          const context = await enrichParticipantNames(event,
+            await readContext(event, contextToken, boundedFetch, env.WORKER_THREAD_REPLIES === 'true' ? {...options,includeNearby:false,currentThreadOnly:true} : options),
+            config.slackContextToken, boundedFetch);
+          const taskTicket = routeTicket(event,context,{
+            team:config.teamId, owner:config.allowedSenderIds.size === 1 ? [...config.allowedSenderIds][0] : undefined,
+            reviewChannel:env.GITHUB_REVIEW_CHANNEL, selfChannel:env.GITHUB_REVIEW_SELF_CHANNEL,
+            cancelKeywords:config.cancelKeywords, localEnabled:env.OWNER_LOCAL_TASKS === "true", businessChannel:env.BUSINESS_CHANNEL,
+            businessSenders:env.BUSINESS_SENDERS, businessTestDm:env.BUSINESS_TEST_DM, key:env.GITHUB_REVIEW_SIGNING_KEY,
+          });
+          return taskTicket ? { ...context, githubReviewTicket: taskTicket } : context;
+        },
         store: new UpstashThreadStore(
           config.kvRestApiUrl,
           config.kvRestApiToken,
@@ -351,6 +381,8 @@ export async function consumeQueue(
       },
       boundedFetch,
     );
+    if (env.WORKER_THREAD_REPLIES === 'true' && result.issueId && ['created','comment_persisted','duplicate'].includes(result.action))
+      await scheduleReply(replyJob(event,result.issueId),config,boundedFetch);
     console.info("relay_dispatch", {
       ...result,
       eventId: digest(messageKey(event)),

@@ -14,6 +14,20 @@ import slack_intent as route
 
 
 class RoutingTests(unittest.TestCase):
+    def test_native_startup_failure_keeps_private_diagnostic_without_exposing_it(self):
+        from types import SimpleNamespace
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder);(root/'agent').mkdir();(root/'review').mkdir()
+            (root/'agent/config.json').write_text('{"enabled":true}')
+            policy=root/'review/evidence.json';policy.write_text('{"python":"python3"}')
+            with patch.object(route.review_evidence,"PRIVATE",root),patch.object(route.review_evidence,"POLICY",policy), \
+                 patch.object(route.subprocess,"run",return_value=SimpleNamespace(returncode=1,stderr="private diagnostic",stdout="")):
+                reply=route.dispatch("prepare",self.args,self.key,self.fail)["reply"]
+            self.assertIn("退出码 1",reply)
+            self.assertNotIn("private diagnostic",reply)
+            files=list((root/'runs/native-startup').glob('*.json'))
+            self.assertEqual(len(files),1)
+            self.assertEqual(json.loads(files[0].read_text())["stderr"],"private diagnostic")
     target="team/repo/pull/19"
     def setUp(self):
         self.e={"teamId":"T","channelId":"C","threadTs":"1","messageTs":str(time.time()),"senderUserId":"REVIEWER","mention":{"type":"user","id":"OWNER"},"text":"<@OWNER> 帮忙看下这个 PR"}
@@ -36,7 +50,7 @@ class RoutingTests(unittest.TestCase):
 
     def test_model_cannot_grant_local_or_select_unseen_target(self):
         self.assertEqual(route.select(self.c,{"route":"local"})["route"],"unsupported")
-        for targets in [[],[self.target,"other/repo/pull/18"]]:
+        for targets in [[]]:
             self.assertEqual(route.select({**self.c,"targets":targets},{"route":"review","target":self.target})["route"],"clarify")
         self.assertEqual(route.select(self.c,{"route":"review","target":"other/repo/pull/1"})["route"],"clarify")
         self.assertEqual(route.select({**self.c,"review":False},{"route":"review","target":self.target})["route"],"unsupported")
@@ -58,3 +72,27 @@ class RoutingTests(unittest.TestCase):
 
     def test_empty_commitment_is_not_a_chat_answer(self):
         self.assertEqual(route.select(self.c,{"route":"answer","answer":"收到，我马上处理。"})["route"],"clarify")
+
+    def test_explicit_batch_keeps_all_selected_targets(self):
+        targets=[self.target,"team/repo/pull/20"]
+        c={**self.c,"targets":targets}
+        self.assertEqual(route.select(c,{"route":"review","targets":targets}),{"route":"review","targets":targets})
+        self.assertEqual(route.select(c,{"route":"review","targets":[]})["route"],"clarify")
+        self.assertEqual(route.select(c,{"route":"review","targets":["evil/repo/pull/9"]})["route"],"clarify")
+
+    def test_batch_continues_after_failure_and_replay_does_not_vote_twice(self):
+        calls=[]
+        targets=[self.target,"team/repo/pull/20"]
+        def review(stage,args,repo,num,options):
+            calls.append(num)
+            self.assertEqual(options["job_scope"],f"{repo}/pull/{num}")
+            if num==19: raise OSError("unavailable")
+            return {"reply":"completed"}
+        with tempfile.TemporaryDirectory() as folder, patch.object(route.review_evidence,"PRIVATE",Path(folder)):
+            (Path(folder)/"review").mkdir()
+            plan={"route":"review","targets":targets}
+            one=route.batch_review(self.args,self.c,self.key,plan,review)
+            two=route.batch_review(self.args,self.c,self.key,plan,review)
+            self.assertEqual(calls,[19,20])
+            self.assertTrue(one["reply"].startswith("relay-agent/1 "))
+            self.assertTrue(two["reply"].startswith("relay-agent/1 "))

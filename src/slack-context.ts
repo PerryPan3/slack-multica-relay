@@ -19,7 +19,7 @@ const project = (raw: RawMessage, optional = false): ContextMessage => {
     ...(optional&&Buffer.byteLength(text)>4096 ? {textTruncated:true} : {}),
     ...(optional&&Array.isArray(raw.files)&&raw.files.length>5 ? {filesTruncated:true} : {}) };
 };
-export interface ContextReadOptions { sinceTs?: string; includeNearby?: boolean; referenceTexts?: string[] }
+export interface ContextReadOptions { currentThreadOnly?: boolean; sinceTs?: string; includeNearby?: boolean; referenceTexts?: string[] }
 export async function readContext(event: SlackThreadEvent, token: string, fetchImpl: typeof fetch = fetch, options: ContextReadOptions = {}): Promise<ThreadContext> {
   const readStartedAt = Date.now();
   if (!timestampValid(event.threadTs) || !timestampValid(event.messageTs) || compareTs(event.threadTs,event.messageTs)>0) throw new Error('invalid_context_scope');
@@ -133,7 +133,7 @@ export async function readContext(event: SlackThreadEvent, token: string, fetchI
   // Explicit same-conversation links have a deterministic window; never recurse
   // through retrieved messages or read a linked conversation with wider access.
   const references=new Map<string,string|undefined>();
-  const texts=[event.text,...(options.referenceTexts??[]),currentRoot.text,...current.messages.map(m=>m.text)];
+  const texts=options.currentThreadOnly ? [] : [event.text,...(options.referenceTexts??[]),currentRoot.text,...current.messages.map(m=>m.text)];
   for(const text of texts)for(const match of text.matchAll(/https:\/\/[^\s<>|]+/g)){
     let url:URL;try{url=new URL(match[0]);}catch{continue;}
     const target=url.pathname.match(/^\/archives\/([A-Z0-9]+)\/p(\d{7,})$/);

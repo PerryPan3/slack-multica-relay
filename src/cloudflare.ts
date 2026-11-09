@@ -1,6 +1,25 @@
 import { acceptSlack, consumeQueue, json } from './http.js';
 
 export default {
+  async scheduled(_event: unknown, env: Record<string, string | undefined>): Promise<void> {
+    const baseUrl = new URL(env.MULTICA_API_BASE_URL ?? '');
+    if (baseUrl.protocol !== 'https:' || baseUrl.username || baseUrl.password || !env.MULTICA_API_TOKEN)
+      throw new Error('invalid_renewal_configuration');
+
+    const response = await fetch(new URL('/api/tokens/current/renew', baseUrl), {
+      method: 'POST',
+      headers: { authorization: 'Bearer ' + env.MULTICA_API_TOKEN },
+      redirect: 'manual',
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!response.ok) throw new Error('multica_renewal_http_' + response.status);
+    const {renewed, expires_at} = await response.json();
+    if (typeof renewed !== 'boolean' || typeof expires_at !== 'string' ||
+        !(expires_at === '' && !renewed || Date.parse(expires_at) > Date.now()))
+      throw new Error('invalid_renewal_receipt');
+    console.info('multica_token_renewal', {renewed, expires_at});
+  },
+
   async fetch(request: Request, env: Record<string, string | undefined>): Promise<Response> {
     const path = new URL(request.url).pathname;
     if (path === '/api/slack/events') return acceptSlack(request, env);
