@@ -7,6 +7,10 @@ const scope={key:"test",team:"T1",owner:"PERRY",reviewChannel:"C2",selfChannel:"
 const context={timeline:{messages:[{ts:"10.1",authorId:"KEVEN",text:"https://github.com/team/repo/pull/19"},
   {ts:"9.1",authorId:"OTHER",text:"https://github.com/team/repo/pull/20"}]}} as ThreadContext;
 function claim(event:SlackThreadEvent){const t=routeTicket(event,context,scope)!;return JSON.parse(Buffer.from(t.split(".")[1],"base64url").toString());}
+it.each(["D9","G9","C9"])("preserves the owner's review capability for an admitted self-assignment in %s",channelId=>{
+  expect(claim({...e,senderUserId:"PERRY",channelId})).toMatchObject({local:true,review:true});
+  expect(routeTicket({...e,senderUserId:"KEVEN",channelId},context,scope)).toBeUndefined();
+});
 it("passes unfamiliar phrases and the actual root to the classifier without signing a local grant for colleagues",()=>{
   expect(claim(e)).toMatchObject({review:true,local:false,targets:["team/repo/pull/19"]});
   expect(claim(e).history[0].text).toContain("pull/19");

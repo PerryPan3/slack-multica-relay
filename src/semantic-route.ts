@@ -17,7 +17,7 @@ export function routeTicket(event:SlackThreadEvent, context:ThreadContext, scope
   if (!scope.key || scope.team !== event.teamId || event.mention.type !== "user" || event.mention.id !== scope.owner) return;
   const own = isOwnerSelfMention(event,scope.owner,scope.team);
   const local = own && scope.localEnabled;
-  const review = event.channelId === scope.reviewChannel ||
+  const review = Boolean(local && scope.reviewChannel) || event.channelId === scope.reviewChannel ||
     (own && /^D[A-Z0-9]+$/.test(event.channelId) && event.channelId === scope.selfChannel);
   const business = businessAllowed(event,scope,scope.owner,scope.team);
   if (!review && !local && !business) return;

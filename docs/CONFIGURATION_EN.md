@@ -222,4 +222,6 @@ Each run has a 30-minute watchdog and each thread runs serially. The Worker wait
 
 The private native session disables automatic app/plugin tool inheritance. Configured read MCPs remain accessible through the request-bound host gateway. GitHub reads and review submissions use the host connection; remote connector IP restrictions do not establish that the host lacks repository access.
 
+When owner local self-assignment and GitHub review are enabled, admitted owner self-mentions retain formal review capability in every permitted self-assignment conversation. Colleagues remain restricted to their configured channels.
+
 Old review receipts reconcile independently: one failure cannot stop other targets or business queries. Failed authorization preparation retains read tools and offers a retry within the same request. Private session state carries the execution phase and interruption reason into follow-ups; startup diagnostics remain private. GitHub drafts carry a stable task marker from creation, allowing recovery after losing their local IDs. See [reliability testing](RELIABILITY-TESTING.md) for coverage and operational limits.
