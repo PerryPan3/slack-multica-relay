@@ -26,7 +26,7 @@ export function routeTicket(event:SlackThreadEvent, context:ThreadContext, scope
   const thread = root ? [root,...(root.replies?.messages || [])].filter(m => m.ts < event.messageTs) : [];
   const direct = targetsIn(event.text);
   const found = [...new Set(thread.flatMap(m => targetsIn(m.text)))];
-  const targets = direct.length ? direct : found;
+  const targets = [...new Set([...direct,...found])];
   const history = thread.map(m=>({author:m.authorId,text:m.text}));
   const cancellations = thread.filter(m=>m.authorId===scope.owner && isCancelCommand(m.text,
     new Set([scope.owner!]),new Set(),scope.cancelKeywords ?? new Set(["cancel","取消"])))

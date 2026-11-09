@@ -1,6 +1,10 @@
 import { it, expect } from "vitest";
 import { createHmac } from "node:crypto";
-import { genericReviewReply, reviewPresentation, reviewStatistics } from "../src/github-review.js";
+import { genericReviewReply, reviewPresentation, reviewStatistics, targetsIn } from "../src/github-review.js";
+it.each(["","/files","/changes","/commits","/checks","/changes?diff=split#diff-abc"])("recognizes the PR represented by GitHub view %s", suffix=>{
+  expect(targetsIn(`<https://github.com/team/repo/pull/750${suffix}|code changes> https://github.com/team/other/pull/696`))
+    .toEqual(["team/repo/pull/750","team/other/pull/696"]);
+});
 it("rejects signed but malformed metadata and hides missing model data",()=>{
   function signed(value:unknown){
     const body=Buffer.from(JSON.stringify(value)).toString("base64url");

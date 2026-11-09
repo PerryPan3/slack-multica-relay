@@ -117,7 +117,17 @@ class ReviewTasksTests(unittest.TestCase):
         with first.connect() as db:
             db.execute("update tasks set origin='intent1.bad.bad'");db.commit()
         with self.assertRaises(ValueError):self.plan(self.task('2'),'continue')
-        with self.assertRaises(ValueError):
-            self.task('3').prepare(lambda *_:{'actions':[{'target':'team/repo/pull/2','action':'new'}]})
+        unknown=self.task('3',channel='OTHER')
+        self.assertEqual(unknown.prepare(lambda *_:{'actions':[{'target':'team/repo/pull/2','action':'new'}]}),{})
+        self.assertEqual(len(unknown.planning_errors),1)
+
+    def test_invalid_child_does_not_abort_valid_task_and_can_be_replanned(self):
+        task=self.task()
+        result=task.prepare(lambda *_:{'actions':[{'target':'team/repo/pull/999','action':'new'},
+                                                  {'target':TARGET,'action':'new'}]})
+        self.assertIn(TARGET,result)
+        self.assertNotIn('team/repo/pull/999',task.rows())
+        self.assertEqual(len(task.planning_errors),1)
+        self.assertEqual(self.plan(task,'continue'),result)
 
 if __name__=='__main__':unittest.main()

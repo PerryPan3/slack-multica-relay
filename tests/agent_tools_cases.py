@@ -8,6 +8,31 @@ sys.path.insert(0,str(Path(__file__).resolve().parents[1]/"scripts"))
 from agent_tools import readonly_sql, allowed_tool, AgentTools
 
 class NativeToolsTests(unittest.TestCase):
+    def test_failed_old_pr_does_not_block_other_reviews_or_business_work(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        rows={t:{"id":t,"origin":"signed","status":"pending","updated":1}
+              for t in ["team/broken/pull/1","team/working/pull/2"]}
+        agent=AgentTools.__new__(AgentTools); agent.counts={}
+        agent.claim={"review":True,"binding":["T","C","root","2"]}
+        agent.tasks=SimpleNamespace(rows=lambda:rows,origin_claim=Mock(),complete=Mock())
+        with tempfile.TemporaryDirectory() as temp:
+            agent.review=SimpleNamespace(ROOT=Path(temp),snapshot=Mock(side_effect=[
+                RuntimeError("HTTP 403"),{"state":"closed","merged_at":"now","head":{"sha":"abc"}}]))
+            errors=agent.reconcile_reviews()
+            self.assertIn("team/broken/pull/1",errors)
+            self.assertEqual(agent.tasks.complete.call_args.args[0],"team/working/pull/2")
+
+    def test_draft_or_own_pr_remains_readable_without_write_permission(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        agent=AgentTools.__new__(AgentTools);agent.counts={};agent.packets={}
+        agent.claim={"binding":["explain this PR"],"history":[]}
+        agent.review=SimpleNamespace(snapshot=Mock(return_value={"state":"open","draft":True}),
+                                    stable_packet=Mock(return_value={"full_diff":"code"}))
+        agent.context("team/repo/pull/1")
+        self.assertEqual(agent.review.stable_packet.call_args.args[-1]["request_mode"],"inspect")
+
     def test_github_read_accepts_rest_paths_and_uses_plural_pr_endpoint(self):
         from types import SimpleNamespace
         from unittest.mock import Mock
@@ -109,9 +134,27 @@ class NativeToolsTests(unittest.TestCase):
         import tomllib
         from agent_runtime import tool_policy
         peer=tomllib.loads(tool_policy(False))["mcp_servers"]["relay"]["tools"]
-        self.assertEqual(set(peer),{"discover_tools","read_tool","github_read","review_context","submit_review"})
+        self.assertEqual(set(peer),{"discover_tools","read_tool","github_read","review_context","submit_review","refresh_reviews"})
         self.assertTrue(all(x["approval_mode"]=="approve" for x in peer.values()))
         self.assertIn("owner_shell",tomllib.loads(tool_policy(True))["mcp_servers"]["relay"]["tools"])
+
+    def test_preparation_failure_keeps_read_tools_available_and_can_be_retried(self):
+        from agent_runtime import prepare_assignments
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        agent=SimpleNamespace(prepare_reviews=Mock(side_effect=[ValueError("invalid classifier JSON"),
+                             {"continue_to_verdict":["team/repo/pull/1"]}]))
+        failure=prepare_assignments(agent)
+        self.assertIn("preparation_error",failure)
+        self.assertEqual(agent.review_plan,{})
+        self.assertEqual(prepare_assignments(agent)["continue_to_verdict"],["team/repo/pull/1"])
+
+    def test_failure_reason_distinguishes_signal_timeout_and_exit(self):
+        import subprocess
+        from agent_runtime import execution_failure
+        self.assertIn("信号 15",execution_failure(subprocess.CalledProcessError(-15,"codex")))
+        self.assertIn("时限",execution_failure(subprocess.TimeoutExpired("codex",1800)))
+        self.assertIn("退出码 1",execution_failure(subprocess.CalledProcessError(1,"codex")))
 
     def test_owner_local_replays_result_without_repeating_execution(self):
         import json
@@ -165,5 +208,60 @@ class NativeToolsTests(unittest.TestCase):
         with patch("review_evidence.isolated_turn",return_value='{"authorized":false}'):
             with self.assertRaises(ValueError):
                 agent.may_vote("team/repo/pull/1")
+
+class NativeSessionTests(unittest.TestCase):
+    def test_missing_end_record_does_not_block_followup_or_claim_no_side_effects(self):
+        from agent_runtime import prior_execution,save_execution
+        with tempfile.TemporaryDirectory() as folder:
+            path=Path(folder)/'last.json'
+            self.assertIsNone(prior_execution(path))
+            path.write_text('{incomplete')
+            self.assertEqual(prior_execution(path)['status'],'unknown')
+            save_execution(path,{'status':'running','request':'id'})
+            self.assertIn('不假定未执行',prior_execution(path)['reason'])
+            self.assertFalse(path.with_suffix('.tmp').exists())
+
+    def test_interrupted_runtime_replays_once_and_followup_resumes_with_diagnostic(self):
+        import agent_runtime as runtime
+        import base64,hashlib,hmac,json,time
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder);private=root/'private';(private/'review').mkdir(parents=True)
+            (private/'review/key').write_text('test-key')
+            (private/'model-home').mkdir();(private/'model-home/auth.json').write_text('{}')
+            (root/'.codex').mkdir();(root/'.codex/config.toml').write_text('model="test-model"')
+            def request(ts):
+                e={'teamId':'T','channelId':'D','threadTs':'1','messageTs':str(ts),'senderUserId':'O',
+                   'mention':{'type':'user','id':'O'},'text':'为什么又停了'}
+                c={'binding':['T','D','1',str(ts),'O','O',e['text']],'local':False,'review':True,
+                   'targets':[],'history':[],'partial':False}
+                b=base64.urlsafe_b64encode(json.dumps(c).encode()).decode().rstrip('=')
+                t='intent1.'+b+'.'+hmac.new(b'test-key',('intent/1:'+b).encode(),hashlib.sha256).hexdigest()
+                return {'event':e,'ticket':t},c
+            first,claim=request(time.time());second,nextclaim=request(time.time()+1)
+            def operations(args,key,directory):
+                return SimpleNamespace(claim=claim if args==first else nextclaim,counts={},receipts=[],
+                    prepare_reviews=lambda:{'continue_to_verdict':[]},services=lambda:[])
+            calls=[]
+            def model(command,**kwargs):
+                calls.append((command,json.loads(kwargs['input'].splitlines()[-1])))
+                kwargs['stdout'].write('{"type":"thread.started","thread_id":"existing-session"}\n')
+                kwargs['stdout'].flush()
+                if len(calls)==1:return SimpleNamespace(returncode=-15)
+                Path(command[command.index('-o')+1]).write_text('已核对并继续完成')
+                return SimpleNamespace(returncode=0)
+            with patch.object(runtime.review_evidence,'PRIVATE',private),patch.object(runtime,'ROOT',private/'runs/native-agent'), \
+                 patch.object(runtime.Path,'home',return_value=root),patch.object(runtime,'AgentTools',side_effect=operations), \
+                 patch.object(runtime.subprocess,'run',side_effect=model):
+                interrupted=runtime.execute(first)
+                self.assertEqual(runtime.execute(first),interrupted)
+                resumed=runtime.execute(second)
+            self.assertEqual(len(calls),2)
+            self.assertIn('resume',calls[1][0]);self.assertIn('existing-session',calls[1][0])
+            self.assertIn('信号 15',calls[1][1]['previous_execution']['reason'])
+            def decode(reply):return json.loads(base64.urlsafe_b64decode(reply['reply'].split(' ',1)[1].split('.')[0]+'==='))
+            self.assertIn('信号 15',decode(interrupted)['text'])
+            self.assertEqual(decode(resumed)['text'],'已核对并继续完成')
 
 unittest.main()

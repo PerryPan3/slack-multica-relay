@@ -31,6 +31,16 @@ const event = {
   mention: { type: "user" as const, id: "U1" },
 };
 const issueId = "00000000-0000-0000-0000-000000000001";
+
+it("delivers a valid Chinese answer whose signed transport exceeds the display limit",async()=>{
+  const f=fixture(event,"user-test","intent1.fixture");
+  const packet={text:"已核查。".repeat(2500),seconds:42,tools:[],reviews:[]};
+  const body=Buffer.from(JSON.stringify(packet)).toString("base64url");
+  f.state.output="relay-agent/1 "+body+"."+createHmac("sha256","key").update("agent-result/1:intent1.fixture:"+body).digest("hex");
+  expect(f.state.output.length).toBeGreaterThan(32000);
+  expect(await deliverReply(f.job,config,f.send,undefined,undefined,"key")).toBe("sent");
+  expect(f.posted()?.text).toContain(packet.text);
+});
 function fixture(source = event, readIdentity = source.channelId.startsWith("D") ? "user-test" : "bot-test", ticket="ticket") {
   const event = source;
   const job = replyJob(event, issueId),

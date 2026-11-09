@@ -59,6 +59,7 @@ class ReviewTasks:
                     break
 
     def prepare(self, classify):
+        self.planning_errors=[]
         self.revoke_cancelled()
         with self.connect() as db:
             saved=db.execute('select plan from turns where event=?',(self.event,)).fetchone()
@@ -73,9 +74,14 @@ class ReviewTasks:
             seen=set()
             with self.connect() as db:
                 for entry in actions:
+                    if not isinstance(entry,dict):
+                        self.planning_errors.append({'error':'Invalid action structure.'})
+                        continue
                     target,action=entry.get('target'),entry.get('action')
-                    if target not in candidates or target in seen or action not in ('new','continue','inspect','cancel','none'):
-                        raise ValueError('Invalid review task action.')
+                    if not isinstance(target,str) or target not in candidates or target in seen or action not in ('new','continue','inspect','cancel','none'):
+                        self.planning_errors.append({'target':target if isinstance(target,str) else None,
+                                                     'error':'Target or action is outside this signed request; no authority granted for this entry.'})
+                        continue
                     seen.add(target)
                     row=rows.get(target)
                     if row and self.ts < row['updated']:
@@ -97,7 +103,8 @@ class ReviewTasks:
                         db.execute('update tasks set updated=? where scope=? and target=?',(self.ts,self.scope,target))
                     if action=='cancel' and row and row['status']=='pending':
                         db.execute("update tasks set status='cancelled',updated=? where scope=? and target=?",(self.ts,self.scope,target))
-                db.execute('insert into turns values(?,?)',(self.event,json.dumps(plan)))
+                if not self.planning_errors:
+                    db.execute('insert into turns values(?,?)',(self.event,json.dumps(plan)))
                 db.commit()
         else:
             with self.connect() as db:

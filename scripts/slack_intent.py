@@ -192,7 +192,11 @@ def dispatch(stage,args,key,run_review):
             process=subprocess.run([python,str(Path(__file__).with_name("agent_runtime.py"))],
                                    input=json.dumps(args),capture_output=True,text=True,timeout=1900)
             if process.returncode:
-                return {"reply":"本次 Agent 未能启动，执行日志已保留供核查。"}
+                logs=review_evidence.PRIVATE/"runs/native-startup"
+                logs.mkdir(parents=True,exist_ok=True,mode=0o700)
+                (logs/(hashlib.sha256(args["ticket"].encode()).hexdigest()+".json")).write_text(json.dumps(
+                    {"phase":"startup","exit_code":process.returncode,"stderr":process.stderr[-16000:]}))
+                return {"reply":"本次 Agent 未能启动（退出码 "+str(process.returncode)+"），私有启动日志已保留。原审查委托不会因此结束，可在原线程追问恢复。"}
             return json.loads(process.stdout)
         plan=frozen_plan(args["ticket"],stage,claim)
     except (ValueError,TypeError,KeyError,AttributeError,OSError,sqlite3.Error,review_evidence.Unavailable,subprocess.SubprocessError,TimeoutError):

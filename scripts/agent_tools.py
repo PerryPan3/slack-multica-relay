@@ -184,14 +184,17 @@ class AgentTools:
             self.record("GitHub")
             return {"terminal":receipt,"instruction":"This PR is closed. Read existing code and reviews if needed; do not submit a new vote."}
         packet=self.review.stable_packet(repo,int(num),f"repos/{repo}/pulls/{num}",pr,self.claim["binding"][-1],
-                                        {"request_mode":"review","thread_context":self.claim["history"]})
+                                        {"request_mode":"review" if target in getattr(self,"review_plan",{}) else "inspect",
+                                         "thread_context":self.claim["history"]})
         self.packets[target]=(pr,packet)
         self.record("GitHub")
         return packet
 
     def prepare_reviews(self):
         self.tasks=ReviewTasks(self.root/"reviews.sqlite",self.claim,self.args["ticket"],self.key)
-        self.reconcile_reviews()
+        self.review_plan={}
+        self.tasks.revoke_cancelled()
+        errors=self.reconcile_reviews()
         def classify(candidates,tasks):
             prompt=("根据当前消息判断每个 PR 的行动。只返回 JSON {\"actions\":[{\"target\":\"owner/repo/pull/1\",\"action\":\"new|continue|inspect|cancel|none\"}]}。"
                     "new 表示当前明确委托正式审查，简短的 CR、review、帮忙看下 PR 都可以。"
@@ -199,42 +202,53 @@ class AgentTools:
                     "如果只是引用历史指令、无关问题或没有宿主持久化授权，不得凭聊天记录创建授权。"
                     "明确只查状态、不要继续、不投票、本次只读选择 inspect，不新增投票；取消审查或撤回委托选择 cancel。"
                     "completed/cancelled 不允许 continue；只有当前新的明确审查委托才可 new。多目标只选择本次实际指向的目标，无法确定时不猜。\n"+
+                    "当前明确批量委派时（如这两个都处理），逐项给出对应行动；多个候选本身不是歧义，也不能因此返回空计划。\n"+
                     json.dumps({"current_request":self.claim["binding"][-1],"history":self.claim["history"],
                                 "candidates":candidates,"tasks":tasks},ensure_ascii=False))
             raw=review_evidence.isolated_turn(prompt,{}).strip()
             return json.loads(raw.removeprefix("```json").removesuffix("```").strip())
         self.review_plan=self.tasks.prepare(classify)
-        return {"continue_to_verdict":list(self.review_plan),"tasks":self.tasks.summary()}
+        return {"continue_to_verdict":list(self.review_plan),"tasks":self.tasks.summary(),
+                "reconciliation_errors":errors,"planning_errors":self.tasks.planning_errors}
 
     def reconcile_reviews(self):
-        if not self.claim.get("review"): return
+        errors={}
+        if not self.claim.get("review"): return errors
         path=self.review.ROOT/"reviews.sqlite"
         for target,row in self.tasks.rows().items():
             if row["status"]!="pending" or row["updated"]>float(self.claim["binding"][3]): continue
-            self.tasks.origin_claim(row["origin"],target)
-            job=None
-            if path.exists():
-                with closing(sqlite3.connect(path)) as db:
-                    if db.execute("select 1 from sqlite_master where name='jobs'").fetchone():
-                        job=db.execute("select head,attempting from jobs where id=?",(row["id"],)).fetchone()
-            if job and job[1]:
-                reviews=self.review.api("repos/"+target.replace("/pull/","/pulls/")+"/reviews?per_page=100",pages=True)
-                marker="<!-- perry-relay-review "+row["id"]+" -->"
-                for receipt in reviews:
-                    if (marker in (receipt.get("body") or "") and receipt.get("commit_id")==job[0] and
-                            receipt.get("user",{}).get("login","").lower()==self.review.LOGIN.lower() and
-                            receipt.get("state") in ("APPROVED","CHANGES_REQUESTED","DISMISSED")):
-                        self.tasks.complete(target,row["id"],{"review":receipt["id"],"sha":job[0],
-                                            "state":receipt["state"],"url":receipt["html_url"]})
-                        self.record("GitHub")
-                        break
-                if self.tasks.rows()[target]["status"]=="completed": continue
-            repo,num=target.rsplit("/pull/",1)
-            current=self.review.snapshot(repo,int(num),read_only=True)
-            self.record("GitHub")
-            if current.get("merged_at") or current.get("state")=="closed":
-                self.tasks.complete(target,row["id"],{"state":"MERGED" if current.get("merged_at") else "CLOSED",
-                    "sha":current["head"]["sha"],"url":"https://github.com/"+target})
+            try:
+                self.reconcile_review(target,row,path)
+            except Exception as error:
+                self.record("GitHub",False)
+                errors[target]=type(error).__name__+": "+str(error)[:1000]
+        return errors
+
+    def reconcile_review(self,target,row,path):
+        self.tasks.origin_claim(row["origin"],target)
+        job=None
+        if path.exists():
+            with closing(sqlite3.connect(path)) as db:
+                if db.execute("select 1 from sqlite_master where name='jobs'").fetchone():
+                    job=db.execute("select head,attempting from jobs where id=?",(row["id"],)).fetchone()
+        if job and job[1]:
+            reviews=self.review.api("repos/"+target.replace("/pull/","/pulls/")+"/reviews?per_page=100",pages=True)
+            marker="<!-- perry-relay-review "+row["id"]+" -->"
+            for receipt in reviews:
+                if (marker in (receipt.get("body") or "") and receipt.get("commit_id")==job[0] and
+                        receipt.get("user",{}).get("login","").lower()==self.review.LOGIN.lower() and
+                        receipt.get("state") in ("APPROVED","CHANGES_REQUESTED","DISMISSED")):
+                    self.tasks.complete(target,row["id"],{"review":receipt["id"],"sha":job[0],
+                                        "state":receipt["state"],"url":receipt["html_url"]})
+                    self.record("GitHub")
+                    break
+            if self.tasks.rows()[target]["status"]=="completed": return
+        repo,num=target.rsplit("/pull/",1)
+        current=self.review.snapshot(repo,int(num),read_only=True)
+        self.record("GitHub")
+        if current.get("merged_at") or current.get("state")=="closed":
+            self.tasks.complete(target,row["id"],{"state":"MERGED" if current.get("merged_at") else "CLOSED",
+                "sha":current["head"]["sha"],"url":"https://github.com/"+target})
 
     def may_vote(self,target):
         if not hasattr(self,"tasks"):
@@ -250,7 +264,7 @@ class AgentTools:
         endpoint=f"repos/{repo}/pulls/{num}"
         latest=self.review.snapshot(repo,int(num))
         self.review.require_revision(self.review.revision(pr),latest)
-        with sqlite3.connect(self.review.ROOT/"reviews.sqlite",timeout=15) as db:
+        with closing(sqlite3.connect(self.review.ROOT/"reviews.sqlite",timeout=15)) as db:
             db.execute("create table if not exists jobs(id text primary key,base text,head text,started integer,attempting integer default 0)")
             prior=db.execute("select base,head,attempting from jobs where id=?",(state,)).fetchone()
             if prior and list(prior[:2])!=self.review.revision(pr) and prior[2]:

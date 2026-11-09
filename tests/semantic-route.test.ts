@@ -12,9 +12,9 @@ it("passes unfamiliar phrases and the actual root to the classifier without sign
   expect(claim(e).history[0].text).toContain("pull/19");
   expect(claim({...e,text:"<@PERRY> 为什么没有处理？"}).binding.at(-1)).toContain("为什么");
 });
-it("restricts eligible scopes and prioritizes a current target over thread history",()=>{
+it("restricts eligible scopes and preserves both current and referenced thread candidates",()=>{
   expect(claim({...e,senderUserId:"PERRY",channelId:"D1"})).toMatchObject({local:true,review:true});
-  expect(claim({...e,text:"<@PERRY> 麻烦看看 https://github.com/team/repo/pull/21"}).targets).toEqual(["team/repo/pull/21"]);
+  expect(claim({...e,text:"<@PERRY> 这个和上面的都看下 https://github.com/team/repo/pull/21"}).targets).toEqual(["team/repo/pull/21","team/repo/pull/19"]);
   expect(routeTicket({...e,channelId:"D2"},context,scope)).toBeUndefined();
   expect(routeTicket({...e,teamId:"T2"},context,scope)).toBeUndefined();
 });

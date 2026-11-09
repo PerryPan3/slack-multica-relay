@@ -14,6 +14,20 @@ import slack_intent as route
 
 
 class RoutingTests(unittest.TestCase):
+    def test_native_startup_failure_keeps_private_diagnostic_without_exposing_it(self):
+        from types import SimpleNamespace
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder);(root/'agent').mkdir();(root/'review').mkdir()
+            (root/'agent/config.json').write_text('{"enabled":true}')
+            policy=root/'review/evidence.json';policy.write_text('{"python":"python3"}')
+            with patch.object(route.review_evidence,"PRIVATE",root),patch.object(route.review_evidence,"POLICY",policy), \
+                 patch.object(route.subprocess,"run",return_value=SimpleNamespace(returncode=1,stderr="private diagnostic",stdout="")):
+                reply=route.dispatch("prepare",self.args,self.key,self.fail)["reply"]
+            self.assertIn("退出码 1",reply)
+            self.assertNotIn("private diagnostic",reply)
+            files=list((root/'runs/native-startup').glob('*.json'))
+            self.assertEqual(len(files),1)
+            self.assertEqual(json.loads(files[0].read_text())["stderr"],"private diagnostic")
     target="team/repo/pull/19"
     def setUp(self):
         self.e={"teamId":"T","channelId":"C","threadTs":"1","messageTs":str(time.time()),"senderUserId":"REVIEWER","mention":{"type":"user","id":"OWNER"},"text":"<@OWNER> 帮忙看下这个 PR"}

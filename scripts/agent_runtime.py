@@ -1,6 +1,7 @@
 """Persistent native Codex sessions with a request-bound, host-owned MCP connection."""
 import asyncio
 import base64
+from contextlib import closing
 import fcntl
 import hashlib
 import hmac
@@ -30,6 +31,7 @@ INSTRUCTIONS="""你是 Slack 中受用户委派工作的 Agent。根据当前消
 先发现相关 MCP 的工具和参数，再实际读取证据。必要时换查询、翻页、读表结构、写 SELECT、关联多张表和交叉核实。不要因没有现成模板就放弃。上游表查 provisioned 的 dbt_dw，ADS 查 reporting-workgroup 的 dbt_dw_serverless。按工具返回的实际连接参数选择环境。
 PR 审查要读取最新完整差异、项目规则、历史意见和必要的文件或数据。通过 submit_review 在 GitHub 明确 Approve 或 Request changes，回帖附实际回执链接。若 head 变化，重新读取并复核。问题没有决定性证据时继续调查，不把猜测作为缺陷；确实无法取证时说明具体缺口。
 review_assignments.continue_to_verdict 列出的 PR 是本轮需要完成的审查。即使当前只是“为什么暂缓”“怎么样了”，也要核对中断原因、继续查证并通过 submit_review 完成决定，不要停在状态复述。没有该授权的状态查询或用户明确要求只查状态、不投票时，只读核对。区分上次已经存在的审批、本次是否投票、PR 是否仍开放。只有拿到写入回执后才声称审批成功。
+review_assignments 出现 preparation_error 时，调用 refresh_reviews 重试授权准备，再完成审查；准备失败不影响只读取证或其他目标。reconciliation_errors 表示个别旧任务的回执暂时无法读取，不代表所有任务无权限。previous_execution 是宿主保存的上轮执行阶段和中断原因，先据此续接；不要把工具缺少参数或可修正的查询错误当作最终阻塞。
 允许自行规划，不需要输出路由或 JSON。工具数量不受固定的 4 轮或 6 次限制。结论用短段落写清已完成内容、依据、必要限制和链接；工具统计由程序添加，不在正文重复日志。正文适合 Slack 阅读：用短段落和项目列表，不使用 Markdown 表格；需要列字段时逐行列出。不要只说收到或承诺未来去做。"""
 
 
@@ -43,9 +45,46 @@ def persist_session(events,session_file):
 
 
 def tool_policy(owner):
-    names=["discover_tools","read_tool","github_read","review_context","submit_review"]
+    names=["discover_tools","read_tool","github_read","review_context","submit_review","refresh_reviews"]
     if owner: names.extend(["owner_shell","owner_operation"])
     return "".join('\n[mcp_servers.relay.tools.'+name+']\napproval_mode="approve"\n' for name in names)
+
+
+def prepare_assignments(operations):
+    try:
+        return operations.prepare_reviews()
+    except Exception as error:
+        operations.review_plan={}
+        return {"continue_to_verdict":[],"preparation_error":type(error).__name__+": "+str(error)[:1000]}
+
+
+def execution_failure(error):
+    if isinstance(error,subprocess.TimeoutExpired):
+        return "执行达到保护时限，进度已保留"
+    if isinstance(error,subprocess.CalledProcessError):
+        return ("执行进程被信号 "+str(-error.returncode)+" 中断" if error.returncode<0
+                else "执行进程异常退出，退出码 "+str(error.returncode))
+    return "执行未完成（"+type(error).__name__+"），需核对私有运行日志"
+
+
+def prior_execution(path):
+    if not path.exists(): return None
+    try:
+        result=json.loads(path.read_text())
+        if not isinstance(result,dict): raise ValueError("invalid execution record")
+        if result.get("status")=="running":
+            return {**result,"status":"unknown","reason":"上轮没有结束记录，先核对工具和审批回执，不假定未执行"}
+        return result
+    except (OSError,ValueError):
+        return {"status":"unknown","reason":"上轮诊断记录不可读，任务与审批状态仍须独立核对"}
+
+
+def save_execution(path,outcome):
+    temporary=path.with_suffix('.tmp')
+    with temporary.open('w') as stream:
+        json.dump(outcome,stream,ensure_ascii=False)
+        stream.flush();os.fsync(stream.fileno())
+    temporary.replace(path)
 
 
 def envelope(text,tools,args,key,seconds):
@@ -99,6 +138,11 @@ def build_server(operations,audit_path):
         """Publish APPROVE or REQUEST_CHANGES for an authorized reviewed head and read back the actual receipt."""
         return await invoke("submit_review",operations.submit,target,head,decision,summary,details)
 
+    @server.tool(annotations=ToolAnnotations(read_only_hint=True, destructive_hint=False, open_world_hint=False))
+    async def refresh_reviews():
+        """Retry preparation of this request's review assignments after a transient failure. Does not publish reviews."""
+        return await invoke("refresh_reviews",operations.prepare_reviews)
+
     if operations.claim.get("local"):
         @server.tool()
         async def owner_shell(command:str):
@@ -121,13 +165,13 @@ def execute(args):
     directory=ROOT/thread
     directory.mkdir(parents=True,exist_ok=True,mode=0o700)
     started=int(time.time())
-    with (directory/"lock").open("a") as lock, sqlite3.connect(ROOT/"sessions.sqlite",timeout=15) as db:
+    with (directory/"lock").open("a") as lock, closing(sqlite3.connect(ROOT/"sessions.sqlite",timeout=15)) as db:
         fcntl.flock(lock,fcntl.LOCK_EX)
         db.execute("create table if not exists replies(id text primary key,reply text)")
         saved=db.execute("select reply from replies where id=?",(identity,)).fetchone()
         if saved: return {"reply":saved[0]}
         operations=AgentTools(args,key,directory)
-        review_assignments=operations.prepare_reviews()
+        review_assignments=prepare_assignments(operations)
         gateway=build_server(operations,directory/(identity+".audit.jsonl"))
         app=gateway.streamable_http_app(stateless_http=True,json_response=True)
         nonce=secrets.token_urlsafe(32)
@@ -173,6 +217,8 @@ def execute(args):
         config += tool_policy(claim.get("local"))
         (home/"config.toml").write_text(config)
         session_file=directory/"session"
+        outcome_file=directory/"last-execution.json"
+        previous=prior_execution(outcome_file)
         final_file=directory/(identity+".final")
         command=[str(review_evidence.PRIVATE/"bin/codex"),"exec"]
         if session_file.exists():
@@ -181,18 +227,26 @@ def execute(args):
         payload=INSTRUCTIONS+"\n"+json.dumps({
             "current_request":event["text"],"same_thread":claim["history"],"context_partial":claim["partial"],
             "review_targets":claim["targets"],"review_assignments":review_assignments,"available_services":operations.services(),
+            "previous_execution":previous,
             "owner_local_allowed":bool(claim.get("local"))},ensure_ascii=False)
+        outcome={"request":identity,"status":"running","started":started}
+        save_execution(outcome_file,outcome)
         try:
             with (directory/(identity+".events.jsonl")).open("w") as output, (directory/(identity+".stderr")).open("w") as errors:
                 run=subprocess.run(command,input=payload,text=True,stdout=output,stderr=errors,cwd=directory,
                                    env={"CODEX_HOME":str(home)},timeout=1800)
-            if run.returncode or not final_file.exists():
+            if run.returncode:
+                raise subprocess.CalledProcessError(run.returncode,command[0])
+            if not final_file.exists():
                 raise RuntimeError("Native Agent execution did not finish. Inspect the private run log.")
             result=final_file.read_text().strip()
             if not result: raise RuntimeError("Native Agent returned an empty answer.")
+            outcome["status"]="completed"
         except Exception as error:
-            result="本次任务执行中断（"+type(error).__name__+"）。"+("已取得的审批回执列在下方。" if operations.receipts else "未取得可确认的完成结果；可以在本线程继续追问，程序会核对已有记录。")
+            outcome.update(status="interrupted",reason=execution_failure(error))
+            result="本次任务"+outcome["reason"]+"。"+("已取得的审批回执列在下方。" if operations.receipts else "未取得可确认的完成结果；可以在本线程继续追问，程序会核对已有记录。")
         finally:
+            save_execution(outcome_file,outcome)
             persist_session(directory/(identity+".events.jsonl"),session_file)
             service.should_exit=True
             worker.join(timeout=10)

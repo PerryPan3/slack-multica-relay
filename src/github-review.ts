@@ -2,7 +2,7 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 
 // Slack links may carry an arbitrary display label. Only inspect the link destination.
 const urlTokens = /<https?:\/\/[^>]+>|https?:\/\/[^\s<>]+/gi;
-const prPath = /^\/([A-Za-z0-9][\w.-]*\/[A-Za-z0-9_.-]+)\/pull\/([1-9]\d*)(?:\/(?:files|commits|checks))?\/?$/;
+const prPath = /^\/([A-Za-z0-9][\w.-]*\/[A-Za-z0-9_.-]+)\/pull\/([1-9]\d*)(?:\/(?:files|changes|commits|checks))?\/?$/;
 export function targetsIn(text: string): string[] {
   const matches = new Set<string>();
   for (const token of text.match(urlTokens) || []) {

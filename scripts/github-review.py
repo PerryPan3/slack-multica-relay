@@ -126,9 +126,8 @@ def received(rows, attempt, head, decision=None):
         if r["state"] not in ("APPROVED", "CHANGES_REQUESTED"):
             continue
         body = r.get("body") or ""
-        if attempt in body or (decision == r["state"] and "<!-- perry-relay-review " in body):
+        if attempt in body:
             return r
-        break
 
 
 def collect(endpoint, pr):
@@ -151,10 +150,13 @@ def collect(endpoint, pr):
         raise Stop("PR 包含未能验证的二进制文件，未提交审批。")
     reviews = api(endpoint + "/reviews?per_page=100", pages=True)
     inline = api(endpoint + "/comments?per_page=100", pages=True)
+    conversation = api(endpoint.replace('/pulls/','/issues/') + "/comments?per_page=100", pages=True)
     notes = [{k:r.get(k) for k in ("state","body","commit_id","html_url")} | {"author":r["user"]["login"]} for r in reviews if r.get("body") or r.get("state") in ("APPROVED","CHANGES_REQUESTED","DISMISSED")]
-    comments = [{k:r.get(k) for k in ("id","path","line","original_line","body","in_reply_to_id","commit_id")} for r in inline]
+    comments = [{k:r.get(k) for k in ("id","path","line","original_line","body","in_reply_to_id","commit_id","original_commit_id","html_url")} for r in inline]
     packet = {"title":pr["title"], "description":pr["body"], "state":pr["state"], "merged_at":pr.get("merged_at"), "base_head":revision(pr), "previous_reviews":notes,
-              "inline_discussion":comments, "full_diff":patch}
+              "inline_discussion":comments, "full_diff":patch,
+              "conversation":[{k:r.get(k) for k in ("id","body","created_at","updated_at","html_url")} |
+                              {"author":r.get("user",{}).get("login")} for r in conversation]}
     if len(json.dumps(packet,ensure_ascii=False).encode()) > 480000:
         raise Stop("本轮完整 diff 和历史意见超过单次审查容量，未提交审批。")
     # Supply surrounding source where feasible, at exact blobs from the changed-file manifest.
@@ -178,9 +180,9 @@ def stable_packet(repo, number, endpoint, pr, focus, context):
     try:
         packet = collect(endpoint, pr)
     except Stop:
-        require_revision(revision(pr), snapshot(repo, number, read_only=context.get("request_mode") == "inspect"))
+        require_revision(revision(pr), snapshot(repo, number, read_only=True))
         raise
-    require_revision(revision(pr), snapshot(repo, number, read_only=context.get("request_mode") == "inspect"))
+    require_revision(revision(pr), snapshot(repo, number, read_only=True))
     return {**packet, **context, "requested_review_focus": focus[:2000]}
 
 
@@ -273,6 +275,13 @@ def finish(repo, number, endpoint, pr, state, ticket, output, db, history=(), po
         db.execute("create table if not exists pending_reviews(target text primary key, review integer not null)")
         target = f"{repo.lower()}/{number}@{row[0]}..{row[1]}"
         saved = db.execute("select review from pending_reviews where target=?", (target,)).fetchone()
+        if not saved:
+            pending=[r for r in reviews if r.get("state")=="PENDING" and r.get("commit_id")==row[1]
+                     and r.get("user",{}).get("login","").lower()==LOGIN.lower() and (r.get("body") or "").strip()==marker]
+            if len(pending)==1:
+                saved=(int(pending[0]["id"]),)
+                db.execute("insert into pending_reviews values(?,?)",(target,saved[0]))
+                db.commit()
         if row[3] and not saved:
             raise Stop("GitHub 上次提交结果待核对，已阻止重复审批。")
         require_revision(revision(pr), snapshot(repo,number))
@@ -280,7 +289,7 @@ def finish(repo, number, endpoint, pr, state, ticket, output, db, history=(), po
             if db.execute("update jobs set attempting=1 where id=? and attempting=0",(state,)).rowcount != 1:
                 raise Stop("同一请求已有审批在处理，请稍后核对 GitHub。")
             db.commit()
-            draft = api(endpoint + "/reviews",write={"commit_id":row[1]})
+            draft = api(endpoint + "/reviews",write={"commit_id":row[1],"body":marker})
             saved = (int(draft["id"]),)
             db.execute("insert into pending_reviews values(?,?)",(target,saved[0]))
             db.commit()
@@ -290,7 +299,7 @@ def finish(repo, number, endpoint, pr, state, ticket, output, db, history=(), po
         review_path = endpoint + "/reviews/" + str(saved[0])
         draft = api(review_path)
         if (draft["state"] != "PENDING" or draft["commit_id"] != row[1] or
-                draft["user"]["login"].lower() != LOGIN.lower() or draft.get("body") or api(review_path + "/comments")):
+                draft["user"]["login"].lower() != LOGIN.lower() or (draft.get("body") or "").strip() not in ("",marker) or api(review_path + "/comments")):
             raise Stop("GitHub 审批草稿已变化，未提交。")
         require_revision(revision(pr), snapshot(repo,number))
         try:

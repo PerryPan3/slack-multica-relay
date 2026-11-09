@@ -196,7 +196,7 @@ export async function deliverReply(
   if (
     typeof output !== "string" ||
     !output.trim() ||
-    Array.from(output).length > (frozen.context?.githubReviewTicket ? 32000 : 12000)
+    Array.from(output).length > (frozen.context?.githubReviewTicket ? 256000 : 12000)
   )
     return "invalid_reply_text";
   const headers = { authorization: "Bearer " + config.slackContextToken };
@@ -262,6 +262,7 @@ export async function deliverReply(
   if (output.startsWith("relay-business/") && !business) return "invalid_business_receipt";
   if (business && !businessAllowed(e,businessScope,ownerId,config.teamId)) return "reply_scope_rejected";
   const visible = business?.text || review?.text || (frozen.context?.githubReviewTicket ? output.trim() : genericReviewReply(e.text, output));
+  if (Array.from(visible).length>32000) return "invalid_reply_text";
   const agentOutput=output.startsWith("relay-agent/1 ");
   const chars = Array.from(agentOutput?agentSlackText(visible):visible);
   const blocks: unknown[] = [];
@@ -285,7 +286,10 @@ export async function deliverReply(
     if (issueLink) contextLines.push("<" + issueLink + "|" + label + ">");
     if (review?.repositoryLine) contextLines.push(review.repositoryLine);
   }
-  for (const text of contextLines) blocks.push({type:"context", elements:[{type:"mrkdwn", text}]});
+  for (const text of contextLines) {
+    // Each repository and statistic is a complete link-safe line.
+    for (const line of text.split("\n")) blocks.push({type:"context", elements:[{type:"mrkdwn", text:line}]});
+  }
   blocks.push({
     type: "context",
     block_id: blockId,
