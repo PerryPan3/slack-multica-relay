@@ -33,6 +33,32 @@ it("keeps multi-channel colleague grants paired through admission and signed cap
     {...config,blockedSenderIds:new Set(["PEER4"])},grants)).toBe(false);
 });
 function claim(event:SlackThreadEvent){const t=routeTicket(event,context,scope)!;return JSON.parse(Buffer.from(t.split(".")[1],"base64url").toString());}
+it("allows four colleagues in both selected channels and only their own direct messages",()=>{
+  const peers=["KEVEN","MINGHO","PEER3","PEER4"];
+  const dms=["D2","D3","D4","D5"];
+  const grants=peers.flatMap((sender,i)=>["C2:"+sender,"C3:"+sender,dms[i]+":"+sender]).join(",");
+  const config={allowedChannelIds:new Set(["C2","C3",...dms]),allowedSenderIds:new Set(["PERRY"]),
+    blockedSenderIds:new Set(),allowAllSenders:false} as RelayConfig;
+  const enabled={...scope,reviewGrants:grants,businessGrants:grants};
+  for(const sender of [...peers,"OTHER"]){
+    for(const channel of ["C2","C3","C4","G9","D1",...dms,"D9"]){
+      const event={...e,senderUserId:sender,channelId:channel};
+      const allowed=peers.includes(sender) && (["C2","C3"].includes(channel) || channel===dms[peers.indexOf(sender)]);
+      expect(channelSenderAllowed(event,config,grants),sender+":"+channel).toBe(allowed);
+      expect(businessAllowed(event,enabled,"PERRY","T1")).toBe(allowed);
+      if(allowed){
+        const ticket=routeTicket(event,context,enabled)!;
+        expect(JSON.parse(Buffer.from(ticket.split(".")[1],"base64url").toString()))
+          .toMatchObject({review:true,business:true,local:false});
+      }
+    }
+  }
+  const dm={...e,channelId:"D2"};
+  expect(routeTicket({...dm,mention:{type:"user",id:"OTHER"}},context,enabled)).toBeUndefined();
+  expect(routeTicket({...dm,teamId:"T2"},context,enabled)).toBeUndefined();
+  expect(routeTicket(dm,context,{...enabled,reviewGrants:"",businessGrants:""})).toBeUndefined();
+  expect(channelSenderAllowed(dm,{...config,blockedSenderIds:new Set(["KEVEN"])},grants)).toBe(false);
+});
 it.each(["D9","G9","C9"])("preserves the owner's review capability for an admitted self-assignment in %s",channelId=>{
   expect(claim({...e,senderUserId:"PERRY",channelId})).toMatchObject({local:true,review:true});
   expect(routeTicket({...e,senderUserId:"KEVEN",channelId},context,scope)).toBeUndefined();

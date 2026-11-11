@@ -67,7 +67,7 @@ export async function scheduleReply(
 export function channelSenderAllowed(event: SlackThreadEvent, config: RelayConfig, grants = "") {
   if (config.blockedSenderIds.has(event.senderUserId)) return false;
   if (config.allowAllSenders || config.allowedSenderIds.has(event.senderUserId)) return true;
-  if (!/^[CG]/.test(event.channelId) || !config.allowedChannelIds.has(event.channelId)) return false;
+  if (!/^[CDG][A-Z0-9]+$/.test(event.channelId) || !config.allowedChannelIds.has(event.channelId)) return false;
   const pair = event.channelId + ":" + event.senderUserId;
   return grants.split(",").some(grant => grant.trim() === pair);
 }

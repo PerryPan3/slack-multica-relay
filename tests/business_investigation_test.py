@@ -26,6 +26,16 @@ class BusinessTests(unittest.TestCase):
         self.assertEqual(route.select(self.claim("U1","C"),{"route":"business"})["route"],"business")
         self.assertEqual(route.select(self.claim("U2","C"),{"route":"local"})["route"],"unsupported")
 
+    def test_direct_messages_require_the_exact_colleague_and_conversation(self):
+        peers=["U1","U2","U3","U4"]
+        dms=["D2","D3","D4","D5"]
+        policy={**self.config,"channel_sender_grants":[c+":"+u for i,u in enumerate(peers) for c in ["C","C2",dms[i]]]}
+        for sender in peers+["U9"]:
+            for channel in ["C","C2","C9","G9","D1",*dms,"D9"]:
+                allowed=sender in peers and (channel in ["C","C2"] or channel==dms[peers.index(sender)])
+                self.assertEqual(b.permitted(self.claim(sender,channel),policy),allowed,(sender,channel))
+        self.assertFalse(b.permitted(self.claim("U1","D2"),self.config))
+
     def test_fixed_sql_templates_and_bounded_arguments(self):
         columns={"server":"redshift-mcp-server","tool":"list_columns","args":{"cluster_identifier":"cluster","column_database_name":"dw"},
                  "choices":{"schema":["dwd"]},"purpose":"cols"}

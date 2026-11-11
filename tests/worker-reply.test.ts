@@ -108,6 +108,7 @@ function fixture(source = event, readIdentity = source.channelId.startsWith("D")
         ok: true,
         messages: [
           { ts: event.threadTs, user: event.senderUserId, text: state.sourceText },
+          ...(event.messageTs!==event.threadTs ? [{ts:event.messageTs,thread_ts:event.threadTs,user:event.senderUserId,text:state.sourceText}] : []),
           ...(posted ? [posted] : []),
         ],
       });
@@ -237,6 +238,27 @@ it.each(["D9","G9","C9"])("uses the owner's identity for a self-assignment in %s
   expect(await deliverReply(owner.job,scoped,owner.send,"bot-test","C1:U2")).toBe("sent");
   const other = fixture({...event,channelId,senderUserId:"U2"});
   expect(await deliverReply(other.job,scoped,other.send,"bot-test","C1:U2")).toBe("reply_scope_rejected");
+});
+
+it("replies to a colleague's granted DM thread and rejects revoked or mismatched grants",async()=>{
+  const scoped={...config,allowedChannelIds:new Set(["D1","D2","D3"])};
+  const grants="D2:U2,D3:U3";
+  const source={...event,channelId:"D2",senderUserId:"U2",threadTs:"9.001"};
+  const packet={text:"已核实",seconds:1,tools:[{name:"Jira",count:1,failed:0}],reviews:[]};
+  const body=Buffer.from(JSON.stringify(packet)).toString("base64url");
+  for(const [change,policy,want] of [
+    [{},grants,"sent"], [{senderUserId:"U3"},grants,"reply_scope_rejected"],
+    [{channelId:"D3"},grants,"reply_scope_rejected"], [{},"D3:U3","reply_scope_rejected"],
+  ] as const){
+    const f=fixture({...source,...change},"user-test","intent1.fixture");
+    f.state.output="relay-agent/1 "+body+"."+createHmac("sha256","key").update("agent-result/1:intent1.fixture:"+body).digest("hex");
+    expect(await deliverReply(f.job,scoped,f.send,"bot-test",policy,"key")).toBe(want);
+    expect(f.state.posts).toBe(want==="sent"?1:0);
+    if(want==="sent") expect(f.posted()).toMatchObject({channel:"D2",thread_ts:"9.001"});
+  }
+  const blocked=fixture(source);
+  expect(await deliverReply(blocked.job,{...scoped,blockedChannelIds:new Set(["D2"])},blocked.send,"bot-test",grants))
+    .toBe("reply_scope_rejected");
 });
 
 it("posts one truthful notice if a semantic task exhausts the wait window",async()=>{

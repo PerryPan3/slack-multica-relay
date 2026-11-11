@@ -214,7 +214,9 @@ Multi-channel access uses comma-separated `CHANNEL_ID:USER_ID` pairs. `SLACK_ALL
 
 Existing `GITHUB_REVIEW_CHANNEL` and `BUSINESS_CHANNEL` / `BUSINESS_SENDERS` settings remain supported. For the legacy business fallback, mirror the pairs in the private `runtime/business/policy.json` array `channel_sender_grants`. Ingress, consumption and reply delivery recheck admission; revoking a sender/channel grant prevents an unsent reply.
 
-Before deployment, verify owner membership, installed user history scopes, event subscriptions and a real channel read using the configured identity. `SLACK_CHANNEL_READ_TOKEN` may use the authorized owner user token or a bot already present in the channel. Colleague grants do not extend to DMs or other channels. Test the pair matrix and use owner self-DMs; channel test messages require separate authorization.
+One-to-one colleague DMs may also be explicitly granted. Verify the colleague's DM with the owner through Slack, add the exact `D…:U…` pair to all three grant lists above, and add the DM ID to `SLACK_ALLOWED_CHANNEL_IDS`. DM reads use `SLACK_CONTEXT_TOKEN` and require installed `im:history` and the `message.im` subscription. Each pair admits only that colleague in that specific DM, without opening other DMs or group DMs. `GITHUB_REVIEW_SELF_CHANNEL` remains the owner self-DM setting.
+
+Before deployment, verify owner membership, installed user history scopes, event subscriptions and a real channel read using the configured identity. `SLACK_CHANNEL_READ_TOKEN` may use the authorized owner user token or a bot already present in the channel. Test every colleague in granted channels, their own DM, other DMs and ungranted channels. Verify original-thread replies and revocation before delivery. Channel test messages require separate authorization.
 
 ### Native tool-using agent
 
