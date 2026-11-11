@@ -233,7 +233,7 @@ Worker 用 BUSINESS_CHANNEL、BUSINESS_SENDERS 和 BUSINESS_TEST_DM 指定唯一
 
 每次新请求和 resume 都注入当前档案，私有 `last-execution.json` 记录其 SHA-256，供核验实际加载版本。相同请求已完成后的重试复用原交付结果，不重新执行；修改档案后应发起新消息验证。
 
-`repository_knowledge` 工具按提交读取仓库入口、适用目录规则和指定知识文档，返回文档链接、知识目录及缺失或读取失败的信息。普通技术提问先定位仓库，再调用该工具；未指定版本时解析仓库实际默认分支并固定提交。PR 的 `review_context` 自动附带当前 head 的入口及变更目录规则。Agent 按入口引用继续读取相关文档，并用返回的 commit 固定版本；`AGENTS.override.md` 优先于同目录 `AGENTS.md`。长结果通过 `read_result` 分页，未读取的文档和不完整目录会明确标记。知识文件不能授予新权限，缺失文件也不自动构成 PR 缺陷或新的审批门槛。
+`repository_knowledge` 工具按提交读取仓库入口、适用目录规则和指定知识文档，返回文档链接、知识目录及缺失或读取失败的信息。普通技术提问先定位仓库，再调用该工具；归属不明确时可通过 `github_read` 的 `search/repositories` 查找完整名称，代码检索使用 `search/code`。未指定版本时解析仓库实际默认分支并固定提交。PR 的 `review_context` 自动附带当前 head 的入口及变更目录规则。Agent 按入口引用继续读取相关文档，并用返回的 commit 固定版本；`AGENTS.override.md` 优先于同目录 `AGENTS.md`。长结果通过 `read_result` 分页，未读取的文档和不完整目录会明确标记。知识文件不能授予新权限，缺失文件也不自动构成 PR 缺陷或新的审批门槛。
 
 在宿主私有目录 `.private/runtime/agent/config.json` 设置 `{"enabled":true}` 后，带 `intent1` 签名的请求交给 `scripts/agent_runtime.py`。可选 `channels` 数组用于先在自聊验证；数组为空或未设置表示覆盖入口已批准的会话，不新增发送人或频道权限。关闭该开关回到旧执行器。旧执行器的固定工具模板和路由类别不约束新 Agent。
 

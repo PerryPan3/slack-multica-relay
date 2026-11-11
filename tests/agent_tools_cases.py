@@ -134,9 +134,12 @@ class NativeToolsTests(unittest.TestCase):
         agent.review.api.assert_called_with("repos/team/repo/pulls/696")
         agent.github("repos/team/repo")
         agent.review.api.assert_called_with("repos/team/repo")
+        for search in ['search/repositories?q=repo+in:name','search/code?q=filename:AGENTS.md+repo:team/repo']:
+            agent.github(search)
+            agent.review.api.assert_called_with(search)
         agent.context("team/repo/pull/696")
         self.assertEqual(agent.review.stable_packet.call_args.args[2],"repos/team/repo/pulls/696")
-        for path in ["https://elsewhere.test/repos/t/r","//repos/t/r","user"]:
+        for path in ["https://elsewhere.test/repos/t/r","//repos/t/r","user","search/users?q=someone"]:
             with self.assertRaises(ValueError): agent.github(path)
 
     def test_submit_uses_durable_task_and_rest_endpoint_then_closes_grant(self):

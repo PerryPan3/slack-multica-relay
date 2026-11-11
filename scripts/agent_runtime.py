@@ -241,7 +241,7 @@ def build_server(operations,audit_path):
 
     @server.tool(annotations=ToolAnnotations(read_only_hint=True, destructive_hint=False, open_world_hint=False))
     async def github_read(path:str):
-        """Read a GitHub repository API path, including project instructions, code, PRs and reviews."""
+        """Read GitHub repository API paths, including instructions, code, PRs and reviews. Discover an unknown owner with search/repositories?q=NAME+in:name; search/code?q=... is also read-only."""
         return await invoke("github_read",operations.github,path)
 
     @server.tool(annotations=ToolAnnotations(read_only_hint=True, destructive_hint=False, open_world_hint=False))

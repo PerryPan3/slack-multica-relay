@@ -192,7 +192,7 @@ class AgentTools:
 
     def github(self,path):
         path=path.removeprefix("/")
-        if not re.fullmatch(r"repos/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:/(?:pulls|issues|contents|git|commits|compare|check-runs|actions/runs)(?:[/?][^\s]*)?)?",path):
+        if not re.fullmatch(r"(?:search/(?:repositories|code)\?[^\s]+|repos/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:/(?:pulls|issues|contents|git|commits|compare|check-runs|actions/runs)(?:[/?][^\s]*)?)?)",path):
             raise ValueError("Use a repository read endpoint.")
         self.record("GitHub")
         result=self.review.api(path)
@@ -203,8 +203,12 @@ class AgentTools:
     def knowledge(self,repo,ref='',paths=None,changed_paths=None,raw=False):
         if not hasattr(self,'repository_reader'):
             def read(path):
+                try:result=self.review.api(path)
+                except Exception:
+                    self.record('GitHub',False)
+                    raise
                 self.record('GitHub')
-                return self.review.api(path)
+                return result
             self.repository_reader=RepositoryKnowledge(read)
         result=self.repository_reader.read(repo,ref,paths,changed_paths)
         if raw:return result
