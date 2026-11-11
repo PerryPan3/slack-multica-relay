@@ -8,7 +8,7 @@ import type { SlackThreadEvent } from "./thread-router.js";
 interface Scope extends BusinessScope {cancelKeywords?:ReadonlySet<string>;team:string; owner?:string; reviewChannel?:string; reviewGrants?:string; selfChannel?:string; localEnabled:boolean; key?:string}
 export interface BusinessScope {businessChannel?:string; businessSenders?:string; businessTestDm?:string; businessGrants?:string}
 function hasGrant(event:SlackThreadEvent, grants?:string) {
-  if (!/^[CG][A-Z0-9]+$/.test(event.channelId)) return false;
+  if (!/^[CDG][A-Z0-9]+$/.test(event.channelId)) return false;
   return (grants||"").split(",").some(grant=>grant.trim()===event.channelId+":"+event.senderUserId);
 }
 export function businessAllowed(event:SlackThreadEvent, scope:BusinessScope, owner:string|undefined, team:string) {

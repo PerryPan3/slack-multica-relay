@@ -222,7 +222,9 @@ Worker 用 BUSINESS_CHANNEL、BUSINESS_SENDERS 和 BUSINESS_TEST_DM 指定唯一
 
 原有 `GITHUB_REVIEW_CHANNEL` 和 `BUSINESS_CHANNEL` / `BUSINESS_SENDERS` 继续有效。旧业务执行器回退时，在私有 `runtime/business/policy.json` 的 `channel_sender_grants` 数组同步对应配对。准入在接收和消费阶段复核，回帖也复核人员与频道；移除接入授权会阻止尚未发出的回帖。
 
-频道加入列表不等于 Slack 已能交付事件。发布前确认所有者已加入频道、用户 history scope 和消息订阅已安装，并用实际配置的读取身份验证该频道。`SLACK_CHANNEL_READ_TOKEN` 可以是已授权的所有者用户凭据，也可以是已加入目标频道的机器人凭据。无需为了同事触发而向其开放私聊或其他频道。验收使用配对矩阵及私聊，群内测试须单独授权。
+同事的一对一私聊也可以显式授权。先用 Slack 核实该同事与所有者的私聊 ID，将准确的 `D…:U…` 配对加入上述三种授权列表，并把私聊 ID 加入 `SLACK_ALLOWED_CHANNEL_IDS`。私聊读取使用 `SLACK_CONTEXT_TOKEN`，需要已安装 `im:history` 和 `message.im` 订阅。每个配对只开放该人与所有者的这一个私聊，不开放其他人的私聊或多人私聊。`GITHUB_REVIEW_SELF_CHANNEL` 仍只用于所有者自聊。
+
+频道加入列表不等于 Slack 已能交付事件。发布前确认所有者已加入频道、用户 history scope 和消息订阅已安装，并用实际配置的读取身份验证该频道。`SLACK_CHANNEL_READ_TOKEN` 可以是已授权的所有者用户凭据，也可以是已加入目标频道的机器人凭据。验收覆盖每个人在已授权群聊、对应私聊、其他私聊和未授权群聊中的结果，并验证回帖留在原线程、撤权后不再回帖。群内测试须单独授权。
 
 ### 持续使用工具的 Agent
 
