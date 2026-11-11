@@ -17,6 +17,7 @@ import review_evidence
 import slack_intent
 from review_tasks import ReviewTasks
 from review_materials import ReviewMaterials
+from repository_knowledge import RepositoryKnowledge
 
 READ_NAME = re.compile(r"^(?:[a-z]+_)*(?:get|list|search|describe|read|fetch|query|explain)(?:_|$)")
 WRITE_NAME = re.compile(r"(?:^|_)(?:create|update|delete|remove|insert|put|post|set|start|stop|trigger|run|restart|cancel|submit|upload|send|execute|grant|revoke|rotate|write|mark|transition|assign)(?:_|$)")
@@ -199,6 +200,17 @@ class AgentTools:
             return {"path":result["path"],"sha":result["sha"],"content":base64.b64decode(result["content"]).decode("utf8",errors="replace")}
         return result
 
+    def knowledge(self,repo,ref='',paths=None,changed_paths=None,raw=False):
+        if not hasattr(self,'repository_reader'):
+            def read(path):
+                self.record('GitHub')
+                return self.review.api(path)
+            self.repository_reader=RepositoryKnowledge(read)
+        result=self.repository_reader.read(repo,ref,paths,changed_paths)
+        if raw:return result
+        text=json.dumps(result,ensure_ascii=False)
+        return self.paged_result(text) if len(text.encode())>24000 else result
+
     def context(self,target,include_closed=False):
         if not slack_intent.TARGET.fullmatch(target):
             raise ValueError("Expected owner/repository/pull/number.")
@@ -220,6 +232,12 @@ class AgentTools:
         if terminal:packet.update(terminal)
         self.record("GitHub")
         if "file_manifest" in packet:
+            try:
+                packet['repository_knowledge']=self.knowledge(repo,pr['head']['sha'],
+                    changed_paths=[f['filename'] for f in packet['file_manifest']],raw=True)
+            except Exception as error:
+                packet['repository_knowledge']={'repo':repo,'commit':pr['head']['sha'],
+                    'error':str(error)[:600],'instruction':'Retry repository_knowledge or use github_read for project rules and relevant docs. This read failure does not revoke review permission.'}
             if not hasattr(self,"materials"): self.materials=ReviewMaterials(self.review.api)
             return self.materials.register(target,pr,packet)
         return packet

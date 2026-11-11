@@ -8,6 +8,23 @@ sys.path.insert(0,str(Path(__file__).resolve().parents[1]/"scripts"))
 from agent_tools import readonly_sql, allowed_tool, AgentTools
 
 class NativeToolsTests(unittest.TestCase):
+    def test_pr_material_includes_pinned_repository_knowledge_and_reports_read_failure(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        agent=AgentTools.__new__(AgentTools);agent.counts={};agent.packets={}
+        agent.claim={'binding':['review'],'history':[]}
+        pr={'state':'open','head':{'sha':'a'*40},'base':{'sha':'b'*40}}
+        agent.review=SimpleNamespace(snapshot=Mock(return_value=pr),stable_packet=Mock(side_effect=lambda *args:{'file_manifest':[{'filename':'models/model.sql','status':'modified'}]}))
+        agent.materials=SimpleNamespace(register=Mock(side_effect=lambda target,pr,packet:packet))
+        agent.knowledge=Mock(return_value={'documents':[{'path':'CLAUDE.md','text':'Project rule'}]})
+        result=agent.context('team/repo/pull/1')
+        agent.knowledge.assert_called_with('team/repo','a'*40,changed_paths=['models/model.sql'],raw=True)
+        self.assertEqual(result['repository_knowledge']['documents'][0]['text'],'Project rule')
+        agent.knowledge.side_effect=RuntimeError('HTTP 403')
+        result=agent.context('team/repo/pull/1')
+        self.assertIn('HTTP 403',result['repository_knowledge']['error'])
+        self.assertEqual(result['repository_knowledge']['commit'],'a'*40)
+
     def test_large_chinese_read_result_has_complete_followup_pages(self):
         import json
         agent=AgentTools.__new__(AgentTools)
@@ -207,7 +224,7 @@ class NativeToolsTests(unittest.TestCase):
         import tomllib
         from agent_runtime import tool_policy
         peer=tomllib.loads(tool_policy(False))["mcp_servers"]["relay"]["tools"]
-        self.assertEqual(set(peer),{"discover_tools","read_tool","read_result","github_read","review_context","review_material","review_artifact","aws_tools","aws_read","submit_review","refresh_reviews"})
+        self.assertEqual(set(peer),{"discover_tools","read_tool","read_result","github_read","repository_knowledge","review_context","review_material","review_artifact","aws_tools","aws_read","submit_review","refresh_reviews"})
         self.assertTrue(all(x["approval_mode"]=="approve" for x in peer.values()))
         self.assertIn("owner_shell",tomllib.loads(tool_policy(True))["mcp_servers"]["relay"]["tools"])
 
