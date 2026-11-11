@@ -216,6 +216,14 @@ Worker 用 BUSINESS_CHANNEL、BUSINESS_SENDERS 和 BUSINESS_TEST_DM 指定唯一
 独立业务排查支持由 Agent 编写 Redshift 汇总 SELECT。可使用非递归 CTE、显式等值 JOIN、条件计数和聚合算式。本机在 MCP 解释器中使用 scripts/requirements-business-sql.txt 对应的 SQLGlot 版本解析 Redshift 方言。程序逐层核对物理表的库、schema 以及当前线程或已核验材料中的来源，将每张表限制到同一个最多 31 天的 pt 区间，只执行重新生成的 SQL。最终结果只向 Agent 投影最多 31 行日期和数值汇总；额外一行为截断标记。没有 pt 的表、任意函数、跨库和明细输出会被拒绝。MCP 仍使用 REDSHIFT_ALLOW_WRITE=false 和数据库的只读事务。客户端时间预算不等于数据库强制取消。
 
 
+### 按人员和频道扩展任务权限
+
+多频道接入使用精确的 `频道ID:用户ID` 配对列表，多个配对用逗号分隔。`SLACK_ALLOWED_CHANNEL_IDS` 指定接入频道，`SLACK_CHANNEL_SENDER_GRANTS` 指定可触发的同事；另用 `GITHUB_REVIEW_CHANNEL_SENDER_GRANTS` 开放正式 PR 审查，`BUSINESS_CHANNEL_SENDER_GRANTS` 开放只读业务排查。三种授权分别检查，不能把人员列表与频道列表组合成所有排列。同事不会因此获得本机命令权限。
+
+原有 `GITHUB_REVIEW_CHANNEL` 和 `BUSINESS_CHANNEL` / `BUSINESS_SENDERS` 继续有效。旧业务执行器回退时，在私有 `runtime/business/policy.json` 的 `channel_sender_grants` 数组同步对应配对。准入在接收和消费阶段复核，回帖也复核人员与频道；移除接入授权会阻止尚未发出的回帖。
+
+频道加入列表不等于 Slack 已能交付事件。发布前确认所有者已加入频道、用户 history scope 和消息订阅已安装，并用实际配置的读取身份验证该频道。`SLACK_CHANNEL_READ_TOKEN` 可以是已授权的所有者用户凭据，也可以是已加入目标频道的机器人凭据。无需为了同事触发而向其开放私聊或其他频道。验收使用配对矩阵及私聊，群内测试须单独授权。
+
 ### 持续使用工具的 Agent
 
 在宿主私有目录 `.private/runtime/agent/config.json` 设置 `{"enabled":true}` 后，带 `intent1` 签名的请求交给 `scripts/agent_runtime.py`。可选 `channels` 数组用于先在自聊验证；数组为空或未设置表示覆盖入口已批准的会话，不新增发送人或频道权限。关闭该开关回到旧执行器。旧执行器的固定工具模板和路由类别不约束新 Agent。

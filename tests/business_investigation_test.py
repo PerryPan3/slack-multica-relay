@@ -11,6 +11,11 @@ class BusinessTests(unittest.TestCase):
     def claim(self,sender,channel):
         return {"business":True,"review":True,"local":False,"targets":[],"overflow":False,"partial":False,
                 "binding":["T",channel,"1","2",sender,"U0","查 RPT-481"],"history":[]}
+    def test_extra_channel_grants_do_not_form_a_sender_channel_cross_product(self):
+        policy={**self.config,"channel_sender_grants":["C:U3","C:U4","C2:U4"]}
+        for sender,channel,allowed in [("U3","C",True),("U4","C",True),("U4","C2",True),
+                                     ("U3","C2",False),("U1","C2",False),("U4","D9",False)]:
+            self.assertEqual(b.permitted(self.claim(sender,channel),policy),allowed)
     def test_receiver_constraints_are_rechecked_locally(self):
         for sender,chan,allowed in [("U1","C",True),("U2","C",True),("U9","C",False),("U0","C",False),
                                    ("U1","D1",False),("U0","D1",True),("U0","D9",False),("U2","C2",False)]:

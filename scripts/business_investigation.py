@@ -30,8 +30,9 @@ def load_policy():
 
 def permitted(c, policy):
     team,channel,_,_,sender,mention,_ = c["binding"]
+    paired=channel.startswith(('C','G')) and channel+':'+sender in policy.get('channel_sender_grants',[])
     return (c.get("business") is True and team==policy["team"] and mention==policy["owner"] and
-            ((channel==policy["channel"] and sender in policy["senders"] and sender!=policy["owner"]) or
+            ((((channel==policy["channel"] and sender in policy["senders"]) or paired) and sender!=policy["owner"]) or
              (channel==policy["self_dm"] and sender==policy["owner"])))
 
 

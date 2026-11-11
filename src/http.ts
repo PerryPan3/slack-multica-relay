@@ -315,7 +315,7 @@ export async function consumeQueue(
       if (env.WORKER_THREAD_REPLIES !== 'true') return json({action:'ignored'});
       try {
         const action = await deliverReply(payload, config, (input,init)=>fetchImpl(input,init), env.SLACK_CHANNEL_READ_TOKEN, env.SLACK_CHANNEL_SENDER_GRANTS, env.GITHUB_REVIEW_SIGNING_KEY, env.GITHUB_REVIEW_WORKSPACE_SLUG,
-          {businessChannel:env.BUSINESS_CHANNEL,businessSenders:env.BUSINESS_SENDERS,businessTestDm:env.BUSINESS_TEST_DM});
+          {businessChannel:env.BUSINESS_CHANNEL,businessSenders:env.BUSINESS_SENDERS,businessTestDm:env.BUSINESS_TEST_DM,businessGrants:env.BUSINESS_CHANNEL_SENDER_GRANTS});
         console.info('relay_reply', {action, issueId:payload.issueId, attempt:payload.attempt});
         return json({action});
       } catch (error) {
@@ -367,9 +367,9 @@ export async function consumeQueue(
             config.slackContextToken, boundedFetch);
           const taskTicket = routeTicket(event,context,{
             team:config.teamId, owner:config.allowedSenderIds.size === 1 ? [...config.allowedSenderIds][0] : undefined,
-            reviewChannel:env.GITHUB_REVIEW_CHANNEL, selfChannel:env.GITHUB_REVIEW_SELF_CHANNEL,
+            reviewChannel:env.GITHUB_REVIEW_CHANNEL, reviewGrants:env.GITHUB_REVIEW_CHANNEL_SENDER_GRANTS, selfChannel:env.GITHUB_REVIEW_SELF_CHANNEL,
             cancelKeywords:config.cancelKeywords, localEnabled:env.OWNER_LOCAL_TASKS === "true", businessChannel:env.BUSINESS_CHANNEL,
-            businessSenders:env.BUSINESS_SENDERS, businessTestDm:env.BUSINESS_TEST_DM, key:env.GITHUB_REVIEW_SIGNING_KEY,
+            businessSenders:env.BUSINESS_SENDERS, businessGrants:env.BUSINESS_CHANNEL_SENDER_GRANTS, businessTestDm:env.BUSINESS_TEST_DM, key:env.GITHUB_REVIEW_SIGNING_KEY,
           });
           return taskTicket ? { ...context, githubReviewTicket: taskTicket } : context;
         },
