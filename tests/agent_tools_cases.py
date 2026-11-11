@@ -8,6 +8,40 @@ sys.path.insert(0,str(Path(__file__).resolve().parents[1]/"scripts"))
 from agent_tools import readonly_sql, allowed_tool, AgentTools
 
 class NativeToolsTests(unittest.TestCase):
+    def test_large_chinese_read_result_has_complete_followup_pages(self):
+        import json
+        agent=AgentTools.__new__(AgentTools)
+        original=json.dumps({'text':'完整结果'*20000},ensure_ascii=False)
+        page=agent.paged_result(original);parts=[page['text']]
+        while page['next_offset'] is not None:
+            page=agent.read_result(page['result_id'],page['next_offset']);parts.append(page['text'])
+        self.assertEqual(''.join(parts),original)
+        with self.assertRaises(ValueError):agent.read_result('another-request')
+
+    def test_unread_archive_blocks_approve_but_completed_evidence_reaches_submission(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        from review_materials import ReviewMaterials,blob_digest
+        import base64,json
+        target='team/repo/pull/1';raw=b'{"flow":"checked"}'
+        pr={'state':'open','head':{'sha':'head'},'base':{'sha':'base'}}
+        packet={'file_manifest':[{'filename':'flow.tfl','status':'added','artifact_required':True}]}
+        def api(path):
+            if '/contents/' in path:return {'type':'file','sha':blob_digest(raw),'size':len(raw)}
+            return {'encoding':'base64','content':base64.b64encode(raw).decode(),'size':len(raw)}
+        a=AgentTools.__new__(AgentTools);a.claim={'review':True};a.args={'ticket':'signed'}
+        a.review_plan={target:'task'};a.tasks=SimpleNamespace(require=Mock(return_value='task'),complete=Mock())
+        a.packets={target:(pr,packet)};a.receipts=[];a.materials=ReviewMaterials(api);a.materials.register(target,pr,packet)
+        receipt=base64.urlsafe_b64encode(json.dumps({'review':42,'sha':'head','status':'APPROVE'}).encode()).decode()
+        with tempfile.TemporaryDirectory() as folder:
+            a.review=SimpleNamespace(ROOT=Path(folder),snapshot=Mock(return_value=pr),require_revision=Mock(),
+                                     revision=lambda p:['base','head'],finish=Mock(return_value='relay-review/2 '+receipt+'.signature'))
+            blocked=a.submit(target,'head','APPROVE','checked','details')
+            self.assertFalse(blocked['ok']);a.review.finish.assert_not_called()
+            a.materials.inspect(target,'flow.tfl')
+            self.assertEqual(a.submit(target,'head','APPROVE','checked','details')['review'],42)
+            a.review.finish.assert_called_once();a.tasks.complete.assert_called_once()
+
     def test_stdio_launcher_finds_sibling_executable_with_daemon_path(self):
         import asyncio,os,subprocess
         from contextlib import asynccontextmanager
@@ -173,7 +207,7 @@ class NativeToolsTests(unittest.TestCase):
         import tomllib
         from agent_runtime import tool_policy
         peer=tomllib.loads(tool_policy(False))["mcp_servers"]["relay"]["tools"]
-        self.assertEqual(set(peer),{"discover_tools","read_tool","github_read","review_context","submit_review","refresh_reviews"})
+        self.assertEqual(set(peer),{"discover_tools","read_tool","read_result","github_read","review_context","review_material","review_artifact","aws_tools","aws_read","submit_review","refresh_reviews"})
         self.assertTrue(all(x["approval_mode"]=="approve" for x in peer.values()))
         self.assertIn("owner_shell",tomllib.loads(tool_policy(True))["mcp_servers"]["relay"]["tools"])
 
@@ -292,7 +326,7 @@ class NativeSessionTests(unittest.TestCase):
                 return SimpleNamespace(returncode=0)
             with patch.object(runtime.review_evidence,'PRIVATE',private),patch.object(runtime,'ROOT',private/'runs/native-agent'), \
                  patch.object(runtime.Path,'home',return_value=root),patch.object(runtime,'AgentTools',side_effect=operations), \
-                 patch.object(runtime.subprocess,'run',side_effect=model):
+                 patch.object(runtime,'run_model',side_effect=model):
                 interrupted=runtime.execute(first)
                 self.assertEqual(runtime.execute(first),interrupted)
                 resumed=runtime.execute(second)

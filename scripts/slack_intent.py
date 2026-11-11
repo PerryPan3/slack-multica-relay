@@ -4,9 +4,12 @@ import fcntl
 import hashlib
 import hmac
 import json
+import os
 import re
+import signal
 import sqlite3
 import subprocess
+import threading
 import time
 from pathlib import Path
 
@@ -180,6 +183,62 @@ def batch_review(args,claim,key,plan,run_review):
     return {"reply":"relay-agent/1 "+body+"."+sig}
 
 
+def kill_native_group(process):
+    # The model owns a separate process group so runtime cleanup can stop it safely.
+    # If that cleanup is stuck, collect its groups before killing the runtime parent.
+    try:
+        listing=subprocess.run(['/bin/ps','-axo','pid=,ppid=,pgid='],capture_output=True,text=True,timeout=3)
+        rows=[tuple(map(int,line.split())) for line in listing.stdout.splitlines() if len(line.split())==3]
+        descendants={process.pid}
+        while True:
+            found={pid for pid,parent,_group in rows if parent in descendants}
+            if found.issubset(descendants): break
+            descendants.update(found)
+        groups={group for pid,_parent,group in rows if pid in descendants and group==pid}
+    except (OSError,ValueError,subprocess.SubprocessError):
+        groups=set()
+    for group in groups-{process.pid}:
+        try: os.killpg(group,signal.SIGKILL)
+        except ProcessLookupError: pass
+    try: os.killpg(process.pid,signal.SIGKILL)
+    except ProcessLookupError: pass
+
+
+def run_native(command,payload,timeout=2100,grace=20):
+    """Allow runtime cleanup and receipt persistence before terminating its process group."""
+    process=subprocess.Popen(command,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,
+                             text=True,start_new_session=True)
+    previous={}
+    def interrupted(signum,_frame):
+        raise KeyboardInterrupt('Dispatcher received signal '+str(signum))
+    if threading.current_thread() is threading.main_thread():
+        for signum in (signal.SIGTERM,signal.SIGINT): previous[signum]=signal.signal(signum,interrupted)
+    timed_out=False
+    try:
+        try: stdout,stderr=process.communicate(payload,timeout=timeout)
+        except subprocess.TimeoutExpired:
+            timed_out=True
+            process.send_signal(signal.SIGTERM)
+            try: stdout,stderr=process.communicate(timeout=grace)
+            except subprocess.TimeoutExpired:
+                kill_native_group(process)
+                stdout,stderr=process.communicate()
+        result=subprocess.CompletedProcess(command,process.returncode,stdout,stderr)
+        result.timed_out=timed_out
+        return result
+    finally:
+        if process.poll() is None:
+            try: process.send_signal(signal.SIGTERM)
+            except ProcessLookupError: pass
+            try: process.wait(timeout=grace)
+            except subprocess.TimeoutExpired: pass
+        kill_native_group(process)
+        process.wait()
+        for stream in (process.stdin,process.stdout,process.stderr):
+            if stream is not None: stream.close()
+        for signum,handler in previous.items(): signal.signal(signum,handler)
+
+
 def dispatch(stage,args,key,run_review):
     try:
         claim=verified(args,key)
@@ -189,13 +248,15 @@ def dispatch(stage,args,key,run_review):
             if stage!="prepare":
                 raise ValueError("native request is already executing")
             python=json.loads(review_evidence.POLICY.read_text())["python"]
-            process=subprocess.run([python,str(Path(__file__).with_name("agent_runtime.py"))],
-                                   input=json.dumps(args),capture_output=True,text=True,timeout=1900)
+            process=run_native([python,str(Path(__file__).with_name("agent_runtime.py"))],json.dumps(args))
             if process.returncode:
                 logs=review_evidence.PRIVATE/"runs/native-startup"
                 logs.mkdir(parents=True,exist_ok=True,mode=0o700)
                 (logs/(hashlib.sha256(args["ticket"].encode()).hexdigest()+".json")).write_text(json.dumps(
-                    {"phase":"startup","exit_code":process.returncode,"stderr":process.stderr[-16000:]}))
+                    {"phase":"execution" if getattr(process,'timed_out',False) else "startup",
+                     "exit_code":process.returncode,"stderr":process.stderr[-16000:]}))
+                if getattr(process,'timed_out',False):
+                    return {"reply":"本次执行超过等待时限，已停止运行并保留私有日志。请在原线程继续，程序会先核对已有操作和审批回执，不重复提交。"}
                 return {"reply":"本次 Agent 未能启动（退出码 "+str(process.returncode)+"），私有启动日志已保留。原审查委托不会因此结束，可在原线程追问恢复。"}
             return json.loads(process.stdout)
         plan=frozen_plan(args["ticket"],stage,claim)

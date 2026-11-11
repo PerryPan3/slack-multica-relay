@@ -16,6 +16,7 @@ from pathlib import Path
 import review_evidence
 import slack_intent
 from review_tasks import ReviewTasks
+from review_materials import ReviewMaterials
 
 READ_NAME = re.compile(r"^(?:[a-z]+_)*(?:get|list|search|describe|read|fetch|query|explain)(?:_|$)")
 WRITE_NAME = re.compile(r"(?:^|_)(?:create|update|delete|remove|insert|put|post|set|start|stop|trigger|run|restart|cancel|submit|upload|send|execute|grant|revoke|rotate|write|mark|transition|assign)(?:_|$)")
@@ -60,6 +61,7 @@ class AgentTools:
         self.claim=slack_intent.verified(args,key)
         self.connections=tomllib.loads((Path.home()/".codex/config.toml").read_text()).get("mcp_servers",{})
         self.catalog={}
+        self.results={}
         self.counts={}
         self.receipts=[]
         self.packets={}
@@ -71,6 +73,7 @@ class AgentTools:
         self.review.KEY=key
         self.review.LOGIN=config["login"]
         self.review.GH=config["gh"]
+        self.materials=ReviewMaterials(self.review.api)
 
     def record(self,label,ok=True):
         value=self.counts.setdefault(label,{"name":label,"count":0,"failed":0})
@@ -107,8 +110,8 @@ class AgentTools:
             if value.get("isError"):
                 return {"ok":False,"error":str(value.get("content",[]))[:6000]}
             raw=json.dumps(value,ensure_ascii=False)
-            if len(raw)>80000:
-                return {"ok":False,"error":"Result exceeds 80 KB. Narrow the query or use pagination.","truncated":True}
+            if len(raw.encode())>80000:
+                return self.paged_result(raw)
             return {"ok":True,"result":value}
         if "command" in cfg:
             env={k:os.environ[k] for k in cfg.get("env_vars",[]) if k in os.environ}
@@ -134,6 +137,25 @@ class AgentTools:
 
     async def discover(self,server):
         return await asyncio.wait_for(self.upstream(server,"list"),90)
+
+    def paged_result(self,raw):
+        if len(raw.encode())>8*1024*1024:
+            return {"ok":False,"error":"Result exceeds the 8 MiB read buffer. Narrow the upstream query or use its pagination.","truncated":True}
+        if not hasattr(self,"results"):self.results={}
+        result_id=hashlib.sha256(raw.encode()).hexdigest()
+        self.results[result_id]=raw
+        return self.read_result(result_id)
+
+    def read_result(self,result_id,offset=0):
+        if result_id not in getattr(self,"results",{}):
+            raise ValueError("Use a result_id returned by a read in this execution.")
+        text=self.results[result_id]
+        if isinstance(offset,bool) or not isinstance(offset,int) or not 0<=offset<=len(text):
+            raise ValueError("Invalid result offset.")
+        end=min(offset+16000,len(text))
+        return {"ok":True,"result_id":result_id,"text":text[offset:end],"offset":offset,
+                "next_offset":end if end<len(text) else None,"total_chars":len(text),
+                "instruction":"Continue with read_result until next_offset is null; the upstream result is not truncated."}
 
     async def read(self,server,tool,arguments):
         if server not in self.catalog: await self.discover(server)
@@ -177,24 +199,55 @@ class AgentTools:
             return {"path":result["path"],"sha":result["sha"],"content":base64.b64decode(result["content"]).decode("utf8",errors="replace")}
         return result
 
-    def context(self,target):
+    def context(self,target,include_closed=False):
         if not slack_intent.TARGET.fullmatch(target):
             raise ValueError("Expected owner/repository/pull/number.")
         repo,num=target.rsplit("/pull/",1)
         pr=self.review.snapshot(repo,int(num),read_only=True)
+        terminal=None
         if pr.get("merged_at") or pr.get("state")=="closed":
             receipt={"state":"MERGED" if pr.get("merged_at") else "CLOSED","sha":pr["head"]["sha"],
                      "url":"https://github.com/"+target}
             row=self.tasks.rows().get(target) if hasattr(self,"tasks") else None
             if row and row["status"]=="pending": self.tasks.complete(target,row["id"],receipt)
             self.record("GitHub")
-            return {"terminal":receipt,"instruction":"This PR is closed. Read existing code and reviews if needed; do not submit a new vote."}
+            terminal={"terminal":receipt,"instruction":"This PR is closed. Do not submit a new vote. For a retrospective, call review_context with include_closed=true."}
+            if not include_closed:return terminal
         packet=self.review.stable_packet(repo,int(num),f"repos/{repo}/pulls/{num}",pr,self.claim["binding"][-1],
                                         {"request_mode":"review" if target in getattr(self,"review_plan",{}) else "inspect",
-                                         "thread_context":self.claim["history"]})
+                                         "thread_context":self.claim["history"],"native_materials":True})
         self.packets[target]=(pr,packet)
+        if terminal:packet.update(terminal)
         self.record("GitHub")
+        if "file_manifest" in packet:
+            if not hasattr(self,"materials"): self.materials=ReviewMaterials(self.review.api)
+            return self.materials.register(target,pr,packet)
         return packet
+
+    def material(self,target,offset=0):
+        return self.materials.page(target,offset)
+
+    def artifact(self,target,path,side="head",members=None,offset=0):
+        self.record("GitHub")
+        return self.materials.inspect(target,path,side,members,offset)
+
+    def aws_tools(self):
+        import aws_evidence
+        if not any(self.claim.get(k) for k in ("local","review","business")):
+            raise ValueError("This request has no read-tool capability.")
+        return aws_evidence.discover()
+
+    def aws_read(self,service,operation,arguments,profile=None,region=None):
+        import aws_evidence
+        if not any(self.claim.get(k) for k in ("local","review","business")):
+            raise ValueError("This request has no read-tool capability.")
+        try:
+            result=aws_evidence.read(service,operation,arguments,profile=profile,region=region)
+            self.record("AWS",result.get("ok",True))
+            return result
+        except Exception:
+            self.record("AWS",False)
+            raise
 
     def prepare_reviews(self):
         self.tasks=ReviewTasks(self.root/"reviews.sqlite",self.claim,self.args["ticket"],self.key)
@@ -266,6 +319,12 @@ class AgentTools:
         if target not in self.packets: raise ValueError("Read the complete review context first.")
         pr,packet=self.packets[target]
         if head!=pr["head"]["sha"]: raise ValueError("The verdict must identify the reviewed commit.")
+        if "file_manifest" in packet:
+            missing=self.materials.missing(target)
+            required=[m for m in missing if decision=="APPROVE" or m.get("material")]
+            if required:
+                return {"ok":False,"error":"Review evidence is incomplete. Continue reading the listed material; this is not a repository permission failure.",
+                        "missing_count":len(required),"missing":required[:30]}
         repo,num=target.rsplit("/pull/",1)
         endpoint=f"repos/{repo}/pulls/{num}"
         latest=self.review.snapshot(repo,int(num))
