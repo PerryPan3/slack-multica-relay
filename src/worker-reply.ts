@@ -19,7 +19,7 @@ const MAX_REPLY_ATTEMPTS = 180;
 export function agentSlackText(text: string): string {
   return text.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")
     .replace(/\[([^\]\n]+)\]\((https:\/\/[^\s()]+)\)/g,"<$2|$1>")
-    .replace(/\*\*([^*\n]+)\*\*/g,"*$1*");
+    .replace(/\*\*([^*\n]+)\*\*/g,(_,content:string)=>content.includes("`")?content:"*"+content+"*");
 }
 
 interface ReplyJob {
