@@ -32,6 +32,11 @@ const event = {
 };
 const issueId = "00000000-0000-0000-0000-000000000001";
 
+it("does not wrap Slack inline code in unsupported bold markers",()=>{
+  expect(agentSlackText('新增模型放在 **`dbt`**。\n- **`flow` 负责调度**。\n**Done**'))
+    .toBe('新增模型放在 `dbt`。\n- `flow` 负责调度。\n*Done*');
+});
+
 it("delivers a valid Chinese answer whose signed transport exceeds the display limit",async()=>{
   const f=fixture(event,"user-test","intent1.fixture");
   const packet={text:"已核查。".repeat(2500),seconds:42,tools:[],reviews:[]};

@@ -87,7 +87,8 @@ Agent 不需要单独的 `RELAY_ALLOWED_CHANNEL_ID`。Relay 会在入队前校�
 | --- | --- | --- |
 | Relay 准入、队列和持久化 | 上述部署环境变量 | 使用更新后的环境重新部署已测试 commit，再回读 health 与 policy 行为。 |
 | 回复显示名和固定路由身份 | 传给 `scripts/slack-reply.py` 的私有 Runtime JSON | adapter 每次执行都会读取；新的 `displayName` 从下一次发送起生效。 |
-| Agent 人格和操作指令 | Multica Agent Instructions | 可以用本地私有 prompt 维护候选，但必须通过 `multica agent update --instructions` 显式同步，并回读同一个 Agent ID。只修改本地 prompt 文件不会影响 Runtime。 |
+| Multica 外层操作指令 | Multica Agent Instructions | 通过 `multica agent update --instructions` 同步并回读同一个 Agent ID；该配置不会自动传给原生执行器。 |
+| 原生 Slack Agent 的角色和表达偏好 | 私有 `runtime/agent/config.json` 的 `profile_file` 指向的文件 | 每次新执行和同线程追问重新读取，并明确加入本轮输入。 |
 | Slack 等本地工具 | 私有 Runtime Skills 与环境变量 | 更新 Runtime binding/configuration，并回读已绑定 Skill 和环境。本仓库不会自动加载这些文件。 |
 
 ## 部署验收
@@ -227,6 +228,12 @@ Worker 用 BUSINESS_CHANNEL、BUSINESS_SENDERS 和 BUSINESS_TEST_DM 指定唯一
 频道加入列表不等于 Slack 已能交付事件。发布前确认所有者已加入频道、用户 history scope 和消息订阅已安装，并用实际配置的读取身份验证该频道。`SLACK_CHANNEL_READ_TOKEN` 可以是已授权的所有者用户凭据，也可以是已加入目标频道的机器人凭据。验收覆盖每个人在已授权群聊、对应私聊、其他私聊和未授权群聊中的结果，并验证回帖留在原线程、撤权后不再回帖。群内测试须单独授权。
 
 ### 持续使用工具的 Agent
+
+在私有 `runtime/agent/config.json` 配置 `"profile_file":"AGENTS.md"`，将角色、回答模式和表达偏好保存在同目录的 `AGENTS.md`。文件必须位于该私有目录内，是非空 UTF-8 文本，最多 64 KiB。配置后若文件丢失、无效或读取失败，执行会明确报告配置问题，不会悄悄忽略档案。未配置该字段的部署保持原行为。档案不提交公开仓库，也不能扩大工具或写入权限。
+
+每次新请求和 resume 都注入当前档案，私有 `last-execution.json` 记录其 SHA-256，供核验实际加载版本。相同请求已完成后的重试复用原交付结果，不重新执行；修改档案后应发起新消息验证。
+
+`repository_knowledge` 工具按提交读取仓库入口、适用目录规则和指定知识文档，返回文档链接、知识目录及缺失或读取失败的信息。普通技术提问先定位仓库，再调用该工具；归属不明确时可通过 `github_read` 的 `search/repositories` 查找完整名称，代码检索使用 `search/code`。未指定版本时解析仓库实际默认分支并固定提交。PR 的 `review_context` 自动附带当前 head 的入口及变更目录规则。Agent 按入口引用继续读取相关文档，并用返回的 commit 固定版本；`AGENTS.override.md` 优先于同目录 `AGENTS.md`。长结果通过 `read_result` 分页，未读取的文档和不完整目录会明确标记。知识文件不能授予新权限，缺失文件也不自动构成 PR 缺陷或新的审批门槛。
 
 在宿主私有目录 `.private/runtime/agent/config.json` 设置 `{"enabled":true}` 后，带 `intent1` 签名的请求交给 `scripts/agent_runtime.py`。可选 `channels` 数组用于先在自聊验证；数组为空或未设置表示覆盖入口已批准的会话，不新增发送人或频道权限。关闭该开关回到旧执行器。旧执行器的固定工具模板和路由类别不约束新 Agent。
 

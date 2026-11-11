@@ -17,6 +17,39 @@ import agent_runtime as runtime
 
 
 class ProcessRecoveryTests(unittest.TestCase):
+    def test_new_request_and_resumed_thread_receive_the_current_profile(self):
+        from contextlib import contextmanager
+        @contextmanager
+        def gateway(*args):yield 1234,'nonce'
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder);(root/'review').mkdir();(root/'review/key').write_text('test-key')
+            (root/'agent').mkdir();(root/'agent/config.json').write_text(json.dumps({'profile_file':'AGENTS.md'}))
+            profile=root/'agent/AGENTS.md';profile.write_text('Use short, complete sentences.')
+            claim={'binding':['T','D','1'],'history':[],'partial':False,'targets':[],'local':False}
+            operations=SimpleNamespace(counts={},receipts=[],services=lambda:[])
+            payloads=[];commands=[]
+            def model(command,**kwargs):
+                payloads.append(kwargs['input']);commands.append(command)
+                Path(command[command.index('-o')+1]).write_text('Checked the current sources.')
+                kwargs['stdout'].write(json.dumps({'type':'thread.started','thread_id':'same-session'})+'\n')
+                kwargs['stdout'].flush()
+                return SimpleNamespace(returncode=0)
+            def home(directory,*args):
+                path=directory/'home';path.mkdir(exist_ok=True);return path
+            with patch.object(runtime.review_evidence,'PRIVATE',root),patch.object(runtime,'ROOT',root/'runs'), \
+                 patch.object(runtime.slack_intent,'verified',return_value=claim),patch.object(runtime,'AgentTools',return_value=operations), \
+                 patch.object(runtime,'prepare_assignments',return_value={}),patch.object(runtime,'running_gateway',gateway), \
+                 patch.object(runtime,'prepare_home',home),patch.object(runtime,'run_model',model),patch.object(runtime,'envelope',side_effect=lambda result,*args:result):
+                runtime.execute({'ticket':'first','event':{'text':'Check this PR.'}})
+                profile.write_text('Lead with a plain-language conclusion.')
+                runtime.execute({'ticket':'second','event':{'text':'What changed?'}})
+            self.assertIn('Use short, complete sentences.',payloads[0])
+            self.assertIn('Lead with a plain-language conclusion.',payloads[1])
+            self.assertNotIn('Use short, complete sentences.',payloads[1])
+            self.assertIn('resume',commands[1])
+            outcome=json.loads(next((root/'runs').glob('*/last-execution.json')).read_text())
+            self.assertEqual(outcome['profile_sha256'],runtime.load_profile(root)['sha256'])
+
     def test_outer_timeout_preserves_runtime_cleanup_reply(self):
         import slack_intent
         code="""import signal,time,json,sys
@@ -192,6 +225,12 @@ class GatewayRecoveryTests(unittest.TestCase):
         error=runtime.tool_failure(ExceptionGroup('transport',[ConnectionResetError('connection reset')]))
         self.assertIn('ConnectionResetError',error['error'])
         self.assertTrue(error['retryable'])
+
+    def test_repository_knowledge_is_available_to_colleague_requests(self):
+        operations=SimpleNamespace(claim={'local':False},knowledge=Mock(return_value={'commit':'a'*40,'documents':[]}))
+        result=self.call(operations,'repository_knowledge',{'repo':'team/repo','ref':'a'*40,'paths':['docs/joins.md']})
+        self.assertNotIn('Error executing tool',json.dumps(result))
+        operations.knowledge.assert_called_once_with('team/repo','a'*40,['docs/joins.md'])
 
     def test_permission_rejection_is_not_retried_and_writes_are_never_retried(self):
         operations=SimpleNamespace(claim={},discover=AsyncMock(side_effect=PermissionError('access denied')),

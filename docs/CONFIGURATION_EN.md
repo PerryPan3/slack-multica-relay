@@ -87,7 +87,8 @@ The Agent does not need a separate `RELAY_ALLOWED_CHANNEL_ID`. The Relay validat
 | --- | --- | --- |
 | Relay admission, queueing, and persistence | Deployment variables listed above | Redeploy the tested commit with the updated environment, then read back health and policy behavior. |
 | Reply display name and fixed routing identity | Private Runtime JSON passed to `scripts/slack-reply.py` | The adapter reads it on every invocation; a new `displayName` applies to the next send. |
-| Agent personality and operating instructions | Multica Agent Instructions | A private local prompt may hold the candidate, but it must be synchronized explicitly with `multica agent update --instructions` and read back from the same Agent ID. Editing the file alone has no Runtime effect. |
+| Outer Multica operating instructions | Multica Agent Instructions | Synchronize with `multica agent update --instructions` and read back the same Agent ID. These instructions are not automatically passed to the native executor. |
+| Native Slack Agent role and writing preferences | File named by `profile_file` in private `runtime/agent/config.json` | Reloaded and explicitly included in every new execution and same-thread follow-up. |
 | Slack and other local tools | Private Runtime Skills and environment | Update the Runtime binding/configuration and read back the bound Skill and environment. This repository does not load those files. |
 
 ## Deployment verification
@@ -219,6 +220,12 @@ One-to-one colleague DMs may also be explicitly granted. Verify the colleague's 
 Before deployment, verify owner membership, installed user history scopes, event subscriptions and a real channel read using the configured identity. `SLACK_CHANNEL_READ_TOKEN` may use the authorized owner user token or a bot already present in the channel. Test every colleague in granted channels, their own DM, other DMs and ungranted channels. Verify original-thread replies and revocation before delivery. Channel test messages require separate authorization.
 
 ### Native tool-using agent
+
+Set `"profile_file":"AGENTS.md"` in private `runtime/agent/config.json` and keep the role, response modes and writing preferences in that directory's `AGENTS.md`. The file must remain inside the private directory, contain nonempty UTF-8 text and fit within 64 KiB. A configured but missing, invalid or unreadable profile produces an explicit configuration failure instead of silently dropping preferences. Deployments without this setting keep their existing behavior. Never commit the private profile; it cannot expand tool or write permissions.
+
+Every new request and resume receives the current profile. Private `last-execution.json` records its SHA-256 so the loaded version can be verified. Retries of an already completed request reuse the original delivery without running again; send a new message to validate profile changes.
+
+The `repository_knowledge` tool reads entry instructions, applicable directory rules and selected knowledge documents at a pinned commit. It returns source links, a document index and explicit missing/read failures. Technical questions should first identify the repository and call this tool. Use `github_read` with `search/repositories` to resolve an unknown owner, or `search/code` to locate code. Without a ref it resolves the actual default branch to a commit. PR `review_context` automatically includes entry documents and changed-directory rules at the current head. The Agent follows relevant references using the returned commit. `AGENTS.override.md` takes precedence over same-directory `AGENTS.md`. Large results use `read_result` pagination; unread documents and incomplete indexes are labeled. Repository documents do not authorize new capabilities, and absent documents do not automatically become PR defects or new approval gates.
 
 Set `{"enabled":true}` in private `.private/runtime/agent/config.json` to send signed `intent1` requests to `scripts/agent_runtime.py`. An optional `channels` list restricts rollout to validation DMs; an empty or absent list enables the runtime for already admitted requests without widening ingress permissions. Disabling it restores the legacy executor. Legacy fixed catalogs and route categories do not constrain the native agent.
 
