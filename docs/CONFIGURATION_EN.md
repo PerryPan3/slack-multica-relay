@@ -208,6 +208,14 @@ The business catalog uses fixed read-only MCP methods for Jira lookup/search, Re
 Business investigations support agent-authored Redshift aggregate SELECTs with nonrecursive CTEs, explicit equality joins and conditional aggregates. Install scripts/requirements-business-sql.txt in the business MCP interpreter. The relay validates the Redshift AST and physical sources, binds every base scan to the same inclusive pt interval of at most 31 days and executes only regenerated SQL. Only numeric aggregates and dates may leave the adapter, with 31 rows plus a truncation sentinel. Tables without pt, cross-database reads, arbitrary functions and detail projections are unsupported. The upstream MCP additionally uses read-only Redshift transactions. The client wait limit does not guarantee server-side cancellation.
 
 
+### Grants per colleague and channel
+
+Multi-channel access uses comma-separated `CHANNEL_ID:USER_ID` pairs. `SLACK_ALLOWED_CHANNEL_IDS` admits channels and `SLACK_CHANNEL_SENDER_GRANTS` admits colleagues. `GITHUB_REVIEW_CHANNEL_SENDER_GRANTS` grants formal PR review; `BUSINESS_CHANNEL_SENDER_GRANTS` grants read-only investigations. Admission and capabilities are checked separately. Never form a cross-product of sender and channel lists, and never grant colleagues local commands.
+
+Existing `GITHUB_REVIEW_CHANNEL` and `BUSINESS_CHANNEL` / `BUSINESS_SENDERS` settings remain supported. For the legacy business fallback, mirror the pairs in the private `runtime/business/policy.json` array `channel_sender_grants`. Ingress, consumption and reply delivery recheck admission; revoking a sender/channel grant prevents an unsent reply.
+
+Before deployment, verify owner membership, installed user history scopes, event subscriptions and a real channel read using the configured identity. `SLACK_CHANNEL_READ_TOKEN` may use the authorized owner user token or a bot already present in the channel. Colleague grants do not extend to DMs or other channels. Test the pair matrix and use owner self-DMs; channel test messages require separate authorization.
+
 ### Native tool-using agent
 
 Set `{"enabled":true}` in private `.private/runtime/agent/config.json` to send signed `intent1` requests to `scripts/agent_runtime.py`. An optional `channels` list restricts rollout to validation DMs; an empty or absent list enables the runtime for already admitted requests without widening ingress permissions. Disabling it restores the legacy executor. Legacy fixed catalogs and route categories do not constrain the native agent.

@@ -5,19 +5,24 @@ import { targetsIn } from "./github-review.js";
 import type { ThreadContext } from "./context-envelope.js";
 import type { SlackThreadEvent } from "./thread-router.js";
 
-interface Scope {cancelKeywords?:ReadonlySet<string>;team:string; owner?:string; reviewChannel?:string; selfChannel?:string; localEnabled:boolean; businessChannel?:string; businessSenders?:string; businessTestDm?:string; key?:string}
-export interface BusinessScope {businessChannel?:string; businessSenders?:string; businessTestDm?:string}
+interface Scope extends BusinessScope {cancelKeywords?:ReadonlySet<string>;team:string; owner?:string; reviewChannel?:string; reviewGrants?:string; selfChannel?:string; localEnabled:boolean; key?:string}
+export interface BusinessScope {businessChannel?:string; businessSenders?:string; businessTestDm?:string; businessGrants?:string}
+function hasGrant(event:SlackThreadEvent, grants?:string) {
+  if (!/^[CG][A-Z0-9]+$/.test(event.channelId)) return false;
+  return (grants||"").split(",").some(grant=>grant.trim()===event.channelId+":"+event.senderUserId);
+}
 export function businessAllowed(event:SlackThreadEvent, scope:BusinessScope, owner:string|undefined, team:string) {
-  if (!scope.businessChannel || !owner || event.teamId!==team || event.mention.type!=="user" || event.mention.id!==owner) return false;
+  if ((!scope.businessChannel && !scope.businessGrants) || !owner || event.teamId!==team || event.mention.type!=="user" || event.mention.id!==owner) return false;
   if (event.senderUserId===owner)
     return isOwnerSelfMention(event,owner,team) && /^D[A-Z0-9]+$/.test(event.channelId) && event.channelId===scope.businessTestDm;
-  return event.channelId===scope.businessChannel && (scope.businessSenders||"").split(",").map(s=>s.trim()).includes(event.senderUserId);
+  return hasGrant(event,scope.businessGrants) ||
+    (event.channelId===scope.businessChannel && (scope.businessSenders||"").split(",").map(s=>s.trim()).includes(event.senderUserId));
 }
 export function routeTicket(event:SlackThreadEvent, context:ThreadContext, scope:Scope) {
   if (!scope.key || scope.team !== event.teamId || event.mention.type !== "user" || event.mention.id !== scope.owner) return;
   const own = isOwnerSelfMention(event,scope.owner,scope.team);
   const local = own && scope.localEnabled;
-  const review = Boolean(local && scope.reviewChannel) || event.channelId === scope.reviewChannel ||
+  const review = Boolean(local && (scope.reviewChannel || scope.reviewGrants)) || event.channelId === scope.reviewChannel || hasGrant(event,scope.reviewGrants) ||
     (own && /^D[A-Z0-9]+$/.test(event.channelId) && event.channelId === scope.selfChannel);
   const business = businessAllowed(event,scope,scope.owner,scope.team);
   if (!review && !local && !business) return;

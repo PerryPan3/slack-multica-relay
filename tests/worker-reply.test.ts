@@ -260,6 +260,23 @@ it("binds a business result to its request, original self-thread and currently g
   expect(f.posted()?.text).not.toContain("GitHub 审批");
 });
 
+it("delivers an additional channel's business result only while its exact sender grant remains active",async()=>{
+  const scoped={...config,allowedChannelIds:new Set(["D1","C2","C3"])};
+  const grants="C2:U2,C2:U3,C3:U3";
+  const body=Buffer.from(JSON.stringify({text:"已核实业务问题",seconds:12,tools:[{name:"Jira",count:1,failed:0}]})).toString("base64url");
+  for(const sender of ["U2","U3"]){
+    const f=fixture({...event,channelId:"C3",senderUserId:sender},"bot-test","intent1.fixture");
+    f.state.output="relay-business/1 "+body+"."+createHmac("sha256","key").update("business-result/1:intent1.fixture:"+body).digest("hex");
+    expect(await deliverReply(f.job,scoped,f.send,"bot-test",grants,"key","perry",{businessGrants:grants}))
+      .toBe(sender==="U3"?"sent":"reply_scope_rejected");
+    if(sender==="U3") expect(f.posted()?.thread_ts).toBe(event.threadTs);
+  }
+  const revoked=fixture({...event,channelId:"C3",senderUserId:"U3"},"bot-test","intent1.fixture");
+  revoked.state.output="relay-business/1 "+body+"."+createHmac("sha256","key").update("business-result/1:intent1.fixture:"+body).digest("hex");
+  expect(await deliverReply(revoked.job,scoped,revoked.send,"bot-test",grants,"key","perry",{businessGrants:"C2:U3"})).toBe("reply_scope_rejected");
+  expect(revoked.state.posts).toBe(0);
+});
+
 
 it("renders native tools and model in the footer without activating injected mentions",async()=>{
   const f=fixture(event,"user-test","intent1.fixture");

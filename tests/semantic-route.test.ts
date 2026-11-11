@@ -1,11 +1,37 @@
 import {expect,it} from "vitest";
-import {routeTicket} from "../src/semantic-route.js";
+import {routeTicket,businessAllowed} from "../src/semantic-route.js";
+import {channelSenderAllowed} from "../src/worker-reply.js";
+import type {RelayConfig} from "../src/config.js";
 import type {ThreadContext} from "../src/context-envelope.js";
 import type {SlackThreadEvent} from "../src/thread-router.js";
 const e={teamId:"T1",channelId:"C2",senderUserId:"KEVEN",messageTs:"20.1",threadTs:"10.1",text:"<@PERRY> 帮忙过一眼",mention:{type:"user",id:"PERRY"}} as SlackThreadEvent;
 const scope={key:"test",team:"T1",owner:"PERRY",reviewChannel:"C2",selfChannel:"D1",localEnabled:true};
 const context={timeline:{messages:[{ts:"10.1",authorId:"KEVEN",text:"https://github.com/team/repo/pull/19"},
   {ts:"9.1",authorId:"OTHER",text:"https://github.com/team/repo/pull/20"}]}} as ThreadContext;
+
+it("keeps multi-channel colleague grants paired through admission and signed capabilities",()=>{
+  const grants="C2:KEVEN,C2:MINGHO,C2:PEER3,C2:PEER4,C3:PEER4";
+  const config={allowedChannelIds:new Set(["C2","C3"]),allowedSenderIds:new Set(["PERRY"]),
+    blockedSenderIds:new Set(),allowAllSenders:false} as RelayConfig;
+  const enabled={...scope,reviewGrants:grants,businessGrants:grants};
+  for(const sender of ["KEVEN","MINGHO","PEER3","PEER4","OTHER"]){
+    for(const channel of ["C2","C3","C4","D9"]){
+      const event={...e,senderUserId:sender,channelId:channel};
+      const allowed=(channel==="C2" && sender!=="OTHER") || (channel==="C3" && sender==="PEER4");
+      expect(channelSenderAllowed(event,config,grants)).toBe(allowed);
+      expect(businessAllowed(event,enabled,"PERRY","T1")).toBe(allowed);
+      if(allowed){
+        const ticket=routeTicket(event,context,enabled)!;
+        const signed=JSON.parse(Buffer.from(ticket.split(".")[1],"base64url").toString());
+        expect(signed).toMatchObject({review:true,business:true,local:false});
+      }
+    }
+  }
+  expect(routeTicket({...e,senderUserId:"PEER3",channelId:"C3"},context,enabled)).toBeUndefined();
+  expect(businessAllowed({...e,teamId:"OTHER"},enabled,"PERRY","T1")).toBe(false);
+  expect(channelSenderAllowed({...e,senderUserId:"PEER4",channelId:"C3"},
+    {...config,blockedSenderIds:new Set(["PEER4"])},grants)).toBe(false);
+});
 function claim(event:SlackThreadEvent){const t=routeTicket(event,context,scope)!;return JSON.parse(Buffer.from(t.split(".")[1],"base64url").toString());}
 it.each(["D9","G9","C9"])("preserves the owner's review capability for an admitted self-assignment in %s",channelId=>{
   expect(claim({...e,senderUserId:"PERRY",channelId})).toMatchObject({local:true,review:true});
