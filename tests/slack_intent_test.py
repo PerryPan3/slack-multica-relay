@@ -21,7 +21,7 @@ class RoutingTests(unittest.TestCase):
             (root/'agent/config.json').write_text('{"enabled":true}')
             policy=root/'review/evidence.json';policy.write_text('{"python":"python3"}')
             with patch.object(route.review_evidence,"PRIVATE",root),patch.object(route.review_evidence,"POLICY",policy), \
-                 patch.object(route.subprocess,"run",return_value=SimpleNamespace(returncode=1,stderr="private diagnostic",stdout="")):
+                 patch.object(route,"run_native",return_value=SimpleNamespace(returncode=1,stderr="private diagnostic",stdout="")):
                 reply=route.dispatch("prepare",self.args,self.key,self.fail)["reply"]
             self.assertIn("退出码 1",reply)
             self.assertNotIn("private diagnostic",reply)

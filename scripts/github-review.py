@@ -130,11 +130,20 @@ def received(rows, attempt, head, decision=None):
             return r
 
 
-def collect(endpoint, pr):
+def collect(endpoint, pr, *, native=False):
     files = api(endpoint + "/files?per_page=100", pages=True)
-    patch = api(endpoint, diff=True)
-    if len(files) != pr["changed_files"] or len(re.findall(r"^diff --git ", patch, re.M)) != len(files):
+    if len(files) != pr["changed_files"]:
         raise Stop("GitHub 未返回完整的文件差异，无法给出正式审批。")
+    fallback = None
+    try:
+        patch = api(endpoint, diff=True)
+    except (Stop, subprocess.TimeoutExpired) as error:
+        if not native: raise
+        fallback = str(error)
+        patch = ""
+    if len(re.findall(r"^diff --git ", patch, re.M)) != len(files):
+        if not native: raise Stop("GitHub 未返回完整的文件差异，无法给出正式审批。")
+        fallback = fallback or "Combined diff did not include every changed file. Read the pinned base/head blobs instead."
     counts = Counter()
     inside = False
     for line in patch.splitlines():
@@ -145,8 +154,9 @@ def collect(endpoint, pr):
         elif inside and line[:1] in ("+", "-"):
             counts[line[0]] += 1
     if (counts["+"], counts["-"]) != (pr["additions"], pr["deletions"]):
-        raise Stop("GitHub 返回的 diff 行数与 PR 不一致，无法完整审查。")
-    if re.search(r"^(Binary files .* differ|GIT binary patch)$", patch, re.M):
+        if not native: raise Stop("GitHub 返回的 diff 行数与 PR 不一致，无法完整审查。")
+        fallback = "Combined diff line counts do not match. Read all pinned base/head blobs instead."
+    if not native and re.search(r"^(Binary files .* differ|GIT binary patch)$", patch, re.M):
         raise Stop("PR 包含未能验证的二进制文件，未提交审批。")
     reviews = api(endpoint + "/reviews?per_page=100", pages=True)
     inline = api(endpoint + "/comments?per_page=100", pages=True)
@@ -157,6 +167,13 @@ def collect(endpoint, pr):
               "inline_discussion":comments, "full_diff":patch,
               "conversation":[{k:r.get(k) for k in ("id","body","created_at","updated_at","html_url")} |
                               {"author":r.get("user",{}).get("login")} for r in conversation]}
+    if native:
+        if fallback:
+            packet["full_diff"]=None
+            packet["diff_retrieval"]={"status":"read_changed_blobs","reason":fallback}
+        packet["file_manifest"] = [{k:f.get(k) for k in ("filename","previous_filename","sha","status","additions","deletions")} |
+                                   {"artifact_required":bool(fallback) or not bool(f.get("patch"))} for f in files]
+        return packet
     if len(json.dumps(packet,ensure_ascii=False).encode()) > 480000:
         raise Stop("本轮完整 diff 和历史意见超过单次审查容量，未提交审批。")
     # Supply surrounding source where feasible, at exact blobs from the changed-file manifest.
@@ -178,7 +195,7 @@ def collect(endpoint, pr):
 
 def stable_packet(repo, number, endpoint, pr, focus, context):
     try:
-        packet = collect(endpoint, pr)
+        packet = collect(endpoint, pr, native=context.get("native_materials",False))
     except Stop:
         require_revision(revision(pr), snapshot(repo, number, read_only=True))
         raise
