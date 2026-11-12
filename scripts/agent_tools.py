@@ -284,12 +284,14 @@ class AgentTools:
             prompt=("根据当前消息判断每个 PR 的行动。只返回 JSON {\"actions\":[{\"target\":\"owner/repo/pull/1\",\"action\":\"new|continue|inspect|cancel|none\"}]}。"
                     "new 表示当前明确委托正式审查，简短的 CR、review、帮忙看下 PR 都可以。"
                     "宿主 tasks 中 pending 是此前已获得且尚未完成的正式审查授权。对该任务追问为什么暂缓、怎么没做、怎么样了、进展如何或要求继续时选择 continue，继续查证并完成审批，不需要重新说 review。"
+                    "结合 previous_execution 判断当前消息与未完成委托的关系。上轮执行中断后，询问 Agent 是否正常、是否还在或催问是原任务的追问，应继续 pending 任务，不能仅因措辞简短、换了语言或未再提 PR 就降为 inspect/none。"
                     "如果只是引用历史指令、无关问题或没有宿主持久化授权，不得凭聊天记录创建授权。"
-                    "明确只查状态、不要继续、不投票、本次只读选择 inspect，不新增投票；取消审查或撤回委托选择 cancel。"
+                    "只有当前明确限制为只查状态、不要继续、不投票、本次只读才选择 inspect，不新增投票；取消审查或撤回委托选择 cancel。无关的新问题选择 none，不把任务中断后的催问当成无关问题。"
                     "completed/cancelled 不允许 continue；只有当前新的明确审查委托才可 new。多目标只选择本次实际指向的目标，无法确定时不猜。\n"+
                     "当前明确批量委派时（如这两个都处理），逐项给出对应行动；多个候选本身不是歧义，也不能因此返回空计划。\n"+
                     json.dumps({"current_request":self.claim["binding"][-1],"history":self.claim["history"],
-                                "candidates":candidates,"tasks":tasks},ensure_ascii=False))
+                                "candidates":candidates,"tasks":tasks,
+                                "previous_execution":getattr(self,'previous_execution',None)},ensure_ascii=False))
             raw=review_evidence.isolated_turn(prompt,{}).strip()
             return json.loads(raw.removeprefix("```json").removesuffix("```").strip())
         self.review_plan=self.tasks.prepare(classify)
