@@ -6,6 +6,31 @@ The Relay and the Multica Agent Runtime are separate trust domains. Relay variab
 
 ## Relay deployment environment
 
+### Standards required before Agent approval
+
+The native host reads private `.private/runtime/review/standards.json`, containing
+`default` and lowercase `owner/repository` entries in `repositories`. Each policy
+defines required `documents`, `manual_rules`, and an optional `checker: {file,
+sha256}`. A checker is a reviewed copy inside the private review directory, taking
+pinned base/head file contents as data. Never load executable code from the PR.
+Missing configuration, dependencies, documents, complete trees or a matching
+checker digest leaves the check incomplete and prevents approval.
+
+`review_context` includes rule documents, static findings and mandatory assessments
+in material coverage. `review_standards` checks readiness without voting, including
+closed-PR retrospectives. Each assessment supplies `rule_id`, `status`, a concrete
+`reason` and `evidence: [{path, quote}]` matching pinned-head rules and implementation.
+Per-file requirements must cite every specified file. Manual statements cannot
+override static failures. `submit_review` rechecks these conditions and the revision;
+the legacy publication entry also rejects approval without host verification.
+
+Deterministic naming, materialization and column-registration checks share one
+implementation with repository CI. The Agent must separately evidence grain, test
+sufficiency, CTE responsibilities, layering and deployment requirements. CI success
+does not replace these assessments. Validate negative and positive cases before
+updating a private checker copy and digest. Do not publish private configuration or
+repository contents in this repository.
+
 Configure these variables on the deployment platform. Credentials and tokens belong in its secret store. Slack IDs and service URLs are ordinary configuration values, although storing them as secrets is acceptable.
 
 Slack IDs are comma-separated uppercase identifiers. `SLACK_TARGET_USER_IDS` and `SLACK_TARGET_SUBTEAM_IDS` may each be empty, but at least one must contain a target. Blocklists always take precedence over allowlists.

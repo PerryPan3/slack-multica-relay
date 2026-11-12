@@ -6,6 +6,27 @@ Relay 与 Multica Agent Runtime 是两个独立的信任域。Relay 变量配置
 
 ## Relay 部署环境
 
+### Agent 审批前的规范检查
+
+原生审查由宿主读取私有 `.private/runtime/review/standards.json`。配置包含
+`default` 和按小写 `owner/repository` 索引的 `repositories`；每项定义必读
+`documents`、`manual_rules`，以及可选的 `checker: {file, sha256}`。
+checker 必须是私有 review 目录内经过核验的代码副本。它以固定 base/head 的
+文件内容为输入，不能从待审 PR 加载或执行代码。配置、依赖、文档、完整树或
+checker 摘要缺失时，检查保持未完成，不能 Approve。
+
+`review_context` 将规范正文、静态检查结果和必检项一起纳入阅读覆盖记录。
+`review_standards` 可以在不投票的情况下验证审批条件，也适用于已合并 PR 的复盘。
+每个必检项需要 `rule_id`、`status`、具体 `reason` 和 `evidence: [{path, quote}]`，
+引用必须匹配当前 head 的规范和实现原文；有逐文件要求时必须覆盖所有指定文件。
+模型可以报告失败，不能用人工结论覆盖静态检查失败。`submit_review` 重新检查这些
+条件以及提交版本；旧的发布入口没有宿主检查结果也不能直接 Approve。
+
+确定性的命名、物化、字段登记等检查在目标仓库 CI 和宿主共用同一份实现。
+业务粒度、测试充分性、CTE 职责、分层及发布要求由 Agent 逐项提供证据。
+通过 CI 不代替这些审查。升级 checker 时先运行负例和正常样例，再更新私有副本及
+摘要；不把安装配置或私有仓库内容提交到本仓库。
+
 以下变量配置在部署平台中。凭据和 token 必须放入平台的 Secret Store。Slack ID 和服务 URL 属于普通配置，也可以作为 Secret 保存。
 
 Slack ID 使用逗号分隔的大写标识符。`SLACK_TARGET_USER_IDS` 与 `SLACK_TARGET_SUBTEAM_IDS` 可以分别留空，但至少一项必须包含目标。blocklist 的优先级始终高于 allowlist。

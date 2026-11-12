@@ -18,6 +18,7 @@ import slack_intent
 from review_tasks import ReviewTasks
 from review_materials import ReviewMaterials
 from repository_knowledge import RepositoryKnowledge
+from review_standards import ReviewStandards
 
 READ_NAME = re.compile(r"^(?:[a-z]+_)*(?:get|list|search|describe|read|fetch|query|explain)(?:_|$)")
 WRITE_NAME = re.compile(r"(?:^|_)(?:create|update|delete|remove|insert|put|post|set|start|stop|trigger|run|restart|cancel|submit|upload|send|execute|grant|revoke|rotate|write|mark|transition|assign)(?:_|$)")
@@ -236,6 +237,9 @@ class AgentTools:
         if terminal:packet.update(terminal)
         self.record("GitHub")
         if "file_manifest" in packet:
+            if not hasattr(self, "standards"):
+                self.standards = ReviewStandards(self.review.api, self.review.ROOT)
+            packet["standards"] = self.standards.prepare(target, pr, packet)
             try:
                 packet['repository_knowledge']=self.knowledge(repo,pr['head']['sha'],
                     changed_paths=[f['filename'] for f in packet['file_manifest']],raw=True)
@@ -336,11 +340,25 @@ class AgentTools:
             raise ValueError("Review authorization has not been prepared.")
         return self.tasks.require(target,self.review_plan)
 
-    def submit(self,target,head,decision,summary,details):
+    def standards_check(self,target,assessments=None):
+        if target not in self.packets or not hasattr(self, "standards"):
+            return {"ok":False,"error":"Read review_context before checking approval standards."}
+        pr,packet=self.packets[target]
+        missing=self.materials.missing(target)
+        result=self.standards.evaluate(target,[pr["base"]["sha"],pr["head"]["sha"]],assessments)
+        if missing:
+            result.update(ok=False,unread_material=missing)
+        return result
+
+    def submit(self,target,head,decision,summary,details,standards=None):
         state=self.may_vote(target)
         if target not in self.packets: raise ValueError("Read the complete review context first.")
         pr,packet=self.packets[target]
         if head!=pr["head"]["sha"]: raise ValueError("The verdict must identify the reviewed commit.")
+        if decision=="APPROVE":
+            checked=self.standards_check(target,standards)
+            if not checked["ok"]:
+                return {"ok":False,"error":"Approval standards are not satisfied. Complete the mandatory checks; do not override failed checks with a narrative verdict.","standards":checked}
         if "file_manifest" in packet:
             missing=self.materials.missing(target)
             required=[m for m in missing if decision=="APPROVE" or m.get("material")]
@@ -361,7 +379,8 @@ class AgentTools:
             db.commit()
             self.review.GH_CALLS=0
             signed=self.review.finish(repo,int(num),endpoint,pr,state,self.args["ticket"],
-                         json.dumps({"decision":decision,"summary":summary,"details":details},ensure_ascii=False),db)
+                         json.dumps({"decision":decision,"summary":summary,"details":details},ensure_ascii=False),db,
+                         verified_standards=checked if decision=="APPROVE" else None)
         body=signed.split(" ",1)[1].split(".")[0]
         value=json.loads(base64.urlsafe_b64decode(body+"==="))
         if value["review"]:

@@ -53,7 +53,7 @@ def persist_session(events,session_file):
 
 
 def tool_policy(owner):
-    names=["discover_tools","read_tool","read_result","github_read","repository_knowledge","review_context","review_material","review_artifact",
+    names=["discover_tools","read_tool","read_result","github_read","repository_knowledge","review_context","review_material","review_artifact","review_standards",
            "aws_tools","aws_read","submit_review","refresh_reviews"]
     if owner: names.extend(["owner_shell","owner_operation"])
     return "".join('\n[mcp_servers.relay.tools.'+name+']\napproval_mode="approve"\n' for name in names)
@@ -286,10 +286,15 @@ def build_server(operations,audit_path):
         """Perform a discovered read-only AWS operation using host credentials, without exposing credentials to the model."""
         return await invoke("aws_read",operations.aws_read,service,operation,arguments,profile,region,retry_read=True)
 
+    @server.tool(annotations=ToolAnnotations(read_only_hint=True, destructive_hint=False, open_world_hint=False))
+    async def review_standards(target:str,assessments:list[dict]|None=None):
+        """Validate approval readiness without voting, including closed-PR replays. Use the mandatory rules and documents in review_context.standards. Each assessment needs rule_id, status (pass/not_applicable/fail), reason, and evidence [{path, quote}] citing exact pinned-head rule and implementation text. Static failures cannot be waived."""
+        return await invoke("review_standards",operations.standards_check,target,assessments)
+
     @server.tool(annotations=ToolAnnotations(read_only_hint=False, destructive_hint=False, open_world_hint=True))
-    async def submit_review(target:str,head:str,decision:str,summary:str,details:str):
+    async def submit_review(target:str,head:str,decision:str,summary:str,details:str,standards:list[dict]|None=None):
         """Publish APPROVE or REQUEST_CHANGES for an authorized reviewed head and read back the actual receipt."""
-        return await invoke("submit_review",operations.submit,target,head,decision,summary,details)
+        return await invoke("submit_review",operations.submit,target,head,decision,summary,details,standards)
 
     @server.tool(annotations=ToolAnnotations(read_only_hint=True, destructive_hint=False, open_world_hint=False))
     async def refresh_reviews():

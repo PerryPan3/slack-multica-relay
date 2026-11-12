@@ -16,6 +16,7 @@ class NativeToolsTests(unittest.TestCase):
         pr={'state':'open','head':{'sha':'a'*40},'base':{'sha':'b'*40}}
         agent.review=SimpleNamespace(snapshot=Mock(return_value=pr),stable_packet=Mock(side_effect=lambda *args:{'file_manifest':[{'filename':'models/model.sql','status':'modified'}]}))
         agent.materials=SimpleNamespace(register=Mock(side_effect=lambda target,pr,packet:packet))
+        agent.standards=SimpleNamespace(prepare=Mock(return_value={"status":"pass"}))
         agent.knowledge=Mock(return_value={'documents':[{'path':'CLAUDE.md','text':'Project rule'}]})
         result=agent.context('team/repo/pull/1')
         agent.knowledge.assert_called_with('team/repo','a'*40,changed_paths=['models/model.sql'],raw=True)
@@ -49,6 +50,7 @@ class NativeToolsTests(unittest.TestCase):
         a=AgentTools.__new__(AgentTools);a.claim={'review':True};a.args={'ticket':'signed'}
         a.review_plan={target:'task'};a.tasks=SimpleNamespace(require=Mock(return_value='task'),complete=Mock())
         a.packets={target:(pr,packet)};a.receipts=[];a.materials=ReviewMaterials(api);a.materials.register(target,pr,packet)
+        a.standards=SimpleNamespace(evaluate=Mock(side_effect=lambda *args:{"ok":True,"base_head":["base","head"]}))
         receipt=base64.urlsafe_b64encode(json.dumps({'review':42,'sha':'head','status':'APPROVE'}).encode()).decode()
         with tempfile.TemporaryDirectory() as folder:
             a.review=SimpleNamespace(ROOT=Path(folder),snapshot=Mock(return_value=pr),require_revision=Mock(),
@@ -58,6 +60,21 @@ class NativeToolsTests(unittest.TestCase):
             a.materials.inspect(target,'flow.tfl')
             self.assertEqual(a.submit(target,'head','APPROVE','checked','details')['review'],42)
             a.review.finish.assert_called_once();a.tasks.complete.assert_called_once()
+
+    def test_unchecked_or_failed_standards_never_reach_publication(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        target='example/repo/pull/1'
+        a=AgentTools.__new__(AgentTools)
+        a.may_vote=Mock(return_value='task')
+        a.packets={target:({'head':{'sha':'head'},'base':{'sha':'base'}},{'file_manifest':[]})}
+        a.materials=SimpleNamespace(missing=Mock(return_value=[]))
+        a.review=SimpleNamespace(finish=Mock(),snapshot=Mock())
+        self.assertFalse(a.submit(target,'head','APPROVE','verified','all good')['ok'])
+        a.standards=SimpleNamespace(evaluate=Mock(return_value={'ok':False,'findings':[{'rule':'model-suffix'}]}))
+        self.assertFalse(a.submit(target,'head','APPROVE','verified','all good',[{'rule_id':'naming','status':'pass'}])['ok'])
+        a.review.finish.assert_not_called()
+        a.review.snapshot.assert_not_called()
 
     def test_stdio_launcher_finds_sibling_executable_with_daemon_path(self):
         import asyncio,os,subprocess
@@ -152,6 +169,8 @@ class NativeToolsTests(unittest.TestCase):
         agent.claim={"review":True};agent.args={"ticket":"follow-up-ticket"};agent.review_plan={target:"stable-task"}
         agent.tasks=SimpleNamespace(require=Mock(return_value="stable-task"),complete=Mock())
         agent.packets={target:(pr,{})};agent.receipts=[]
+        agent.materials=SimpleNamespace(missing=Mock(return_value=[]))
+        agent.standards=SimpleNamespace(evaluate=Mock(return_value={"ok":True,"base_head":["base","head"]}))
         body=base64.urlsafe_b64encode(json.dumps({"review":42,"sha":"head","status":"APPROVE"}).encode()).decode()
         with tempfile.TemporaryDirectory() as temp:
             agent.review=SimpleNamespace(ROOT=Path(temp),snapshot=Mock(return_value=pr),revision=lambda p:[p["base"]["sha"],p["head"]["sha"]],
@@ -227,7 +246,7 @@ class NativeToolsTests(unittest.TestCase):
         import tomllib
         from agent_runtime import tool_policy
         peer=tomllib.loads(tool_policy(False))["mcp_servers"]["relay"]["tools"]
-        self.assertEqual(set(peer),{"discover_tools","read_tool","read_result","github_read","repository_knowledge","review_context","review_material","review_artifact","aws_tools","aws_read","submit_review","refresh_reviews"})
+        self.assertEqual(set(peer),{"discover_tools","read_tool","read_result","github_read","repository_knowledge","review_context","review_material","review_artifact","review_standards","aws_tools","aws_read","submit_review","refresh_reviews"})
         self.assertTrue(all(x["approval_mode"]=="approve" for x in peer.values()))
         self.assertIn("owner_shell",tomllib.loads(tool_policy(True))["mcp_servers"]["relay"]["tools"])
 
