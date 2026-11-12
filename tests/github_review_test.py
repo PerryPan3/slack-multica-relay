@@ -61,6 +61,13 @@ class ApprovalTests(unittest.TestCase):
         with self.assertRaises(review.Stop):
             self.finish({"base":{"sha":"base"},"head":{"sha":"new"}})
 
+    def test_legacy_publish_cannot_bypass_standards_gate(self):
+        self.verdict=json.dumps({"decision":"APPROVE","summary":"Looks good","details":"Business tests passed"})
+        with patch.object(review,"api") as api:
+            with self.assertRaisesRegex(review.Stop,"规范检查"):
+                self.finish()
+            api.assert_not_called()
+
     def replay_after_push(self, prior_attempt=False, unstable=False):
         import base64
         self.db.execute("create table review_context(thread text,ts real,report text,primary key(thread,ts))")

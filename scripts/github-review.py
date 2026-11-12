@@ -259,7 +259,7 @@ def finding_text(value):
                      if not _DELIVERY_DISCLAIMER.fullmatch(line.strip())).strip()
 
 
-def finish(repo, number, endpoint, pr, state, ticket, output, db, history=(), policy=None, prior_calls=0, mode="review"):
+def finish(repo, number, endpoint, pr, state, ticket, output, db, history=(), policy=None, prior_calls=0, mode="review", verified_standards=None):
     row = db.execute("select base,head,started,attempting from jobs where id=?", (state,)).fetchone()
     if not row:
         raise Stop("找不到本次审查读取代码的记录。")
@@ -281,6 +281,10 @@ def finish(repo, number, endpoint, pr, state, ticket, output, db, history=(), po
     states = {"APPROVE":"APPROVED", "REQUEST_CHANGES":"CHANGES_REQUESTED"}
     if decision not in states:
         raise Stop("Agent 未给出明确的审查决定。")
+    if decision == "APPROVE" and (not isinstance(verified_standards, dict)
+            or verified_standards.get("ok") is not True
+            or verified_standards.get("base_head") != list(row[:2])):
+        raise Stop("规范检查没有完成或属于其他提交，未提交 Approve。请通过原生审查入口补齐必检项。")
     summary, details = finding_text(summary), finding_text(details)
     if not summary and not details:
         raise Stop("缺少可发布的审查依据，未提交审批。")
