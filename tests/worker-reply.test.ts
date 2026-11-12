@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { RelayConfig } from "../src/config.js";
 import { agentSlackText, deliverReply, replyJob } from "../src/worker-reply.js";
-import { digest } from "../src/thread-router.js";
+import { digest, type SlackThreadEvent } from "../src/thread-router.js";
 import { createHmac } from "node:crypto";
 import { agentBody } from "../src/slack-message-text.js";
 
@@ -46,7 +46,7 @@ it("delivers a valid Chinese answer whose signed transport exceeds the display l
   expect(await deliverReply(f.job,config,f.send,undefined,undefined,"key")).toBe("sent");
   expect(f.posted()?.text).toContain(packet.text);
 });
-function fixture(source = event, readIdentity = source.channelId.startsWith("D") ? "user-test" : "bot-test", ticket="ticket") {
+function fixture(source: SlackThreadEvent = event, readIdentity = source.channelId.startsWith("D") ? "user-test" : "bot-test", ticket="ticket") {
   const event = source;
   const job = replyJob(event, issueId),
     scope = digest("workspace:project:agent");
@@ -61,6 +61,8 @@ function fixture(source = event, readIdentity = source.channelId.startsWith("D")
   const state = {
     posts: 0,
     sourceText: event.text,
+    sourceAppId: event.sourceAppId,
+    sourceBotId: undefined as string | undefined,
     runStatus: "completed",
     loseResponse: false,
     queued: 0,
@@ -112,8 +114,8 @@ function fixture(source = event, readIdentity = source.channelId.startsWith("D")
       return Response.json({
         ok: true,
         messages: [
-          { ts: event.threadTs, user: event.senderUserId, text: state.sourceText },
-          ...(event.messageTs!==event.threadTs ? [{ts:event.messageTs,thread_ts:event.threadTs,user:event.senderUserId,text:state.sourceText}] : []),
+          { ts: event.threadTs, user: event.senderUserId, text: state.sourceText, app_id:state.sourceAppId, bot_id:state.sourceBotId },
+          ...(event.messageTs!==event.threadTs ? [{ts:event.messageTs,thread_ts:event.threadTs,user:event.senderUserId,text:state.sourceText,app_id:state.sourceAppId,bot_id:state.sourceBotId}] : []),
           ...(posted ? [posted] : []),
         ],
       });
@@ -174,6 +176,24 @@ describe("Worker self-DM replies", () => {
     expect(await deliverReply(job, config, send)).toBe("sent");
     expect(await deliverReply(job, config, send)).toBe("already_sent");
     expect(state.posts).toBe(1);
+  });
+  it("replies once to a trusted delegated request and rechecks its exact source",async()=>{
+    const settings={...config,allowedUserAppIds:new Set(['ATRUSTED','AOTHER'])};
+    const source={...event,sourceAppId:'ATRUSTED',messageTs:'11.001'};
+    const success=fixture(source);
+    expect(await deliverReply(success.job,settings,success.send)).toBe('sent');
+    expect(await deliverReply(success.job,settings,success.send)).toBe('already_sent');
+    expect(success.state.posts).toBe(1);
+    for(const change of [{sourceAppId:'AOTHER'},{sourceAppId:undefined},{sourceBotId:'BAGENT'}]){
+      const f=fixture(source);Object.assign(f.state,change);
+      expect(await deliverReply(f.job,settings,f.send)).toBe('source_changed');
+      expect(f.state.posts).toBe(0);
+    }
+    const revoked=fixture(source);
+    expect(await deliverReply(revoked.job,config,revoked.send)).toBe('reply_scope_rejected');
+    expect(revoked.state.posts).toBe(0);
+    const human=fixture();human.state.sourceAppId='ATRUSTED';
+    expect(await deliverReply(human.job,settings,human.send)).toBe('source_changed');
   });
   it("recovers a lost response by reading the thread", async () => {
     const { state, job, send } = fixture();

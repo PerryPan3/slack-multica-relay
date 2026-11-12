@@ -44,6 +44,7 @@ Slack IDs are comma-separated uppercase identifiers. `SLACK_TARGET_USER_IDS` and
 | `SLACK_ALLOWED_CHANNEL_IDS` | Yes | Comma-separated Channel IDs. Use `all` only when every channel is intentionally allowed; missing or empty values prevent startup. |
 | `SLACK_BLOCKED_CHANNEL_IDS` | No | Channel IDs that must never trigger, including when the allowlist is `all`. |
 | `SLACK_ALLOWED_SENDER_IDS` | No | User IDs allowed to trigger. Missing or empty values mean `all`; an owner-only deployment should set the exact owner ID. |
+| `SLACK_ALLOWED_USER_APP_IDS` | No | Comma-separated IDs of trusted apps that send requests as users. Empty or absent rejects all app messages. |
 | `SLACK_BLOCKED_SENDER_IDS` | No | User IDs that must never trigger. |
 | `SLACK_BOT_TOKEN` | Conditional | Preferred identity for reaction add/read/remove; requires reactions:read and reactions:write. |
 | `SLACK_USER_TOKEN` | Conditional | Used for reactions when Bot is not configured. |
@@ -52,6 +53,8 @@ Slack IDs are comma-separated uppercase identifiers. `SLACK_TARGET_USER_IDS` and
 | `SLACK_REACTION_NAME` | Yes | Slack emoji shortcode without colons, such as `eyes`. The reaction confirms Relay persistence, not Agent completion. |
 
 The Slack App Request URL is `https://<deployment-host>/api/slack/events`. Subscribe only to message events required by the selected conversation types. Install the App in private channels when needed.
+
+Delegated requests must carry a verified `app_id` and the sender’s `user`, without `bot_id`, `bot_profile`, bot subtypes, or Relay delivery markers. App trust does not widen sender, conversation, or task permissions. Ingress, queue consumption, and final replies recheck app trust. Before replying, the Relay rereads the source and verifies the exact app ID, sender, and text. Display names and “Sent using Claude” text do not establish identity.
 
 | Variable | Required | Value and source |
 | --- | --- | --- |

@@ -3,7 +3,7 @@ import { genericReviewReply, reviewPresentation, reviewStatistics } from "./gith
 import { compareTs } from "./context-envelope.js";
 import type { RelayConfig } from "./config.js";
 import { getIssue, listIssueRuns, findComment } from "./multica-api.js";
-import { findTargetMention } from "./mentions.js";
+import { findTargetMention, allowedSourceApp, isSupportedMessage } from "./mentions.js";
 import { readTaskEnvelope } from "./task-presentation.js";
 import {
   digest,
@@ -143,6 +143,7 @@ export async function deliverReply(
     (state.ignoredThrough &&
       compareTs(e.messageTs, state.ignoredThrough) <= 0) ||
     e.teamId !== config.teamId ||
+    !allowedSourceApp(e.sourceAppId, config.allowedUserAppIds) ||
     config.allowAllSenders ||
     config.allowedSenderIds.size !== 1 ||
     !ownerId || !config.targetUserIds.has(ownerId) ||
@@ -224,6 +225,8 @@ export async function deliverReply(
       text?: string;
       bot_id?: string;
       app_id?: string;
+      bot_profile?: unknown;
+      subtype?: string;
       blocks?: { block_id?: string }[];
     }[];
   }
@@ -251,8 +254,8 @@ export async function deliverReply(
     !source ||
     (source.thread_ts || source.ts) !== e.threadTs ||
     source.user !== e.senderUserId ||
-    source.bot_id ||
-    source.app_id ||
+    !isSupportedMessage({...source,type:'message',channel:e.channelId},config.allowedUserAppIds) ||
+    source.app_id !== e.sourceAppId ||
     source.text !== e.text
   )
     return "source_changed";

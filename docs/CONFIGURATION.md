@@ -40,6 +40,7 @@ Slack ID 使用逗号分隔的大写标识符。`SLACK_TARGET_USER_IDS` 与 `SLA
 | `SLACK_ALLOWED_CHANNEL_IDS` | 是 | 允许触发的 Channel ID，逗号分隔。只有确实允许所有频道时才填写 `all`；缺失或留空会拒绝启动。 |
 | `SLACK_BLOCKED_CHANNEL_IDS` | 否 | 永不触发的 Channel ID；即使 allowlist 为 `all` 也优先阻止。 |
 | `SLACK_ALLOWED_SENDER_IDS` | 否 | 允许触发的 User ID。缺失或留空等同 `all`；owner-only 部署应填写 owner 的准确 ID。 |
+| `SLACK_ALLOWED_USER_APP_IDS` | 否 | 允许代表用户发送请求的应用 ID，逗号分隔；缺失或留空拒绝所有应用消息。 |
 | `SLACK_BLOCKED_SENDER_IDS` | 否 | 永不允许触发的 User ID。 |
 | `SLACK_BOT_TOKEN` | 条件必填 | reaction 添加、查询和清理优先使用的 Bot 身份，需 reactions:read/write。 |
 | `SLACK_USER_TOKEN` | 条件必填 | 未配置 Bot 时用于 reaction 的 User 身份。 |
@@ -48,6 +49,8 @@ Slack ID 使用逗号分隔的大写标识符。`SLACK_TARGET_USER_IDS` 与 `SLA
 | `SLACK_REACTION_NAME` | 是 | 不带冒号的 Slack emoji shortcode，例如 `eyes`。reaction 只确认 Relay 已持久化，不证明 Agent 已完成。 |
 
 Slack App Request URL 为 `https://<deployment-host>/api/slack/events`。只订阅目标频道类型需要的 message events；读取私有频道时必须把 App 安装到对应频道。
+
+应用代发仅接受已核实的 `app_id`，且消息必须保留发送人的 `user`，不能带有 `bot_id`、`bot_profile`、机器人 subtype 或 Relay 回帖标记。应用信任不扩大人员、频道或任务权限。入口、队列消费和最终回帖均复核应用信任；最终回帖还会回读原消息，确认应用 ID、发送人和正文未改变。不要根据显示名称或 “Sent using Claude” 正文判断来源。
 
 | 变量 | 必填 | 取值与来源 |
 | --- | --- | --- |

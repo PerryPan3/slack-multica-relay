@@ -34,6 +34,7 @@ export interface SlackThreadEvent {
   files?: unknown;
   filesTruncated?: boolean;
   sourceFingerprint?: string;
+  sourceAppId?: string;
   operation?: "dispatch" | "cancel";
 }
 export interface ThreadRouterConfig extends ApiConfig {

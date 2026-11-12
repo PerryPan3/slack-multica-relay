@@ -9,6 +9,7 @@ import {
   isCancelCommand,
   canCancelTask,
   isSupportedMessage,
+  allowedSourceApp,
   type SlackMessageEvent,
 } from "./mentions.js";
 import { readContext, enrichParticipantNames } from "./slack-context.js";
@@ -49,6 +50,7 @@ function record(value: unknown): value is Record<string, unknown> {
 function admitted(event: SlackThreadEvent, config: RelayConfig, senderGrants?: string): boolean {
   return (
     event.teamId === config.teamId &&
+    allowedSourceApp(event.sourceAppId, config.allowedUserAppIds) &&
     (config.allowAllChannels || config.allowedChannelIds.has(event.channelId) || isOwnerSelfAssignment(event, config)) &&
     !config.blockedChannelIds.has(event.channelId) &&
     channelSenderAllowed(event, config, senderGrants) &&
@@ -72,6 +74,8 @@ function parsedEvent(value: unknown): SlackThreadEvent {
         typeof value[k] !== "string" || !/^\d+\.\d{1,6}$/u.test(value[k] as string),
     ) ||
     typeof value.text !== "string" ||
+    (value.sourceAppId !== undefined &&
+      (typeof value.sourceAppId !== 'string' || !/^A[A-Z0-9]+$/u.test(value.sourceAppId))) ||
     (value.sourceFingerprint !== undefined &&
       (typeof value.sourceFingerprint !== "string" || !/^[a-f0-9]{64}$/u.test(value.sourceFingerprint))) ||
     (value.operation !== undefined &&
@@ -193,7 +197,7 @@ export async function acceptSlack(
   if (
     body.type !== "event_callback" ||
     !record(body.event) ||
-    !isSupportedMessage(body.event as SlackMessageEvent)
+    !isSupportedMessage(body.event as SlackMessageEvent, config.allowedUserAppIds)
   )
     return json({ action: "ignored" });
   const event = body.event;
@@ -212,6 +216,7 @@ export async function acceptSlack(
       threadTs: event.thread_ts ?? event.ts,
       senderUserId: event.user,
       text: event.text,
+      ...(event.app_id ? {sourceAppId:event.app_id} : {}),
       mention,
       sourceFingerprint: sourceMessageFingerprint(event),
       ...(event.files ? { files: projectFiles(event.files,Number.MAX_SAFE_INTEGER) } : {}),

@@ -22,15 +22,21 @@ export function findTargetMention(
   return undefined;
 }
 
-export function isSupportedMessage(event: SlackMessageEvent): boolean {
+export function allowedSourceApp(appId: unknown, allowedAppIds?: ReadonlySet<string>): boolean {
+  return appId === undefined || (typeof appId === 'string' && /^A[A-Z0-9]+$/u.test(appId) && !!allowedAppIds?.has(appId));
+}
+
+export function isSupportedMessage(event: SlackMessageEvent, allowedAppIds?: ReadonlySet<string>): boolean {
   const subtype = typeof event.subtype === 'string' ? event.subtype : undefined;
   return event.type === 'message'
     && typeof event.channel === 'string'
     && typeof event.ts === 'string'
     && typeof event.text === 'string'
-    && !event.app_id
+    && allowedSourceApp(event.app_id, allowedAppIds)
     && !event.bot_profile
     && !event.bot_id
+    && !(Array.isArray(event.blocks) && event.blocks.some(block => block && typeof block === 'object'
+      && 'block_id' in block && typeof block.block_id === 'string' && block.block_id.startsWith('relay-delivery-')))
     && !['bot_message', 'message_changed', 'message_deleted'].includes(subtype ?? '');
 }
 
@@ -48,6 +54,7 @@ export interface SlackMessageEvent {
   app_id?: unknown;
   bot_profile?: unknown;
   files?: unknown;
+  blocks?: unknown;
 }
 
 export function isCancelCommand(

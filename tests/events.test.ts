@@ -107,6 +107,27 @@ describe("durable admission", () => {
       "/v2/publish/https://relay.test/api/queue/consume",
     );
   });
+  it("admits a trusted user app only within the existing sender and channel grants", async () => {
+    const settings={...env,SLACK_ALLOWED_SENDER_IDS:'U1',SLACK_CHANNEL_SENDER_GRANTS:'C1:U2',SLACK_ALLOWED_USER_APP_IDS:'ATRUSTED'};
+    const send=vi.fn<typeof fetch>().mockResolvedValue(Response.json({messageId:'app-message'}));
+    const response=await acceptSlack(request({...event,user:'U2',app_id:'ATRUSTED'}),settings,send);
+    expect(await response.json()).toMatchObject({action:'accepted'});
+    expect(JSON.parse(String(send.mock.calls[0]![1]?.body))).toMatchObject({senderUserId:'U2',sourceAppId:'ATRUSTED'});
+    for(const change of [{user:'U3'},{channel:'COTHER'},{app_id:'AOTHER'},{bot_id:'BAGENT'},
+      {bot_profile:{id:'BAGENT'}},{subtype:'bot_message'},
+      {blocks:[{block_id:'relay-delivery-'+ 'a'.repeat(64)}]}]){
+      const blocked=vi.fn<typeof fetch>();
+      await acceptSlack(request({...event,user:'U2',app_id:'ATRUSTED',...change}),settings,blocked);
+      expect(blocked).not.toHaveBeenCalled();
+    }
+  });
+  it("rejects a queued user-app request after trust is removed",async()=>{
+    const source={teamId:'T1',channelId:'C1',senderUserId:'U1',messageTs:'1.000001',threadTs:'1.000001',text:'<@U1> review',mention:{type:'user',id:'U1'},sourceAppId:'ATRUSTED'};
+    const send=vi.fn<typeof fetch>();
+    const response=await consumeQueue(new Request(env.RELAY_CONSUMER_URL,{method:'POST',body:JSON.stringify(source)}),env,send);
+    expect(await response.json()).toMatchObject({action:'ignored',reason:'policy_changed'});
+    expect(send).not.toHaveBeenCalled();
+  });
   it("projects attachment metadata before publishing to QStash and hashes log identity", async () => {
     const info = vi.spyOn(console, "info").mockImplementation(() => {});
     const fetcher = vi.fn<typeof fetch>().mockResolvedValue(Response.json({ messageId: "msg" }));

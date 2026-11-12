@@ -27,6 +27,8 @@ Keep the original marker on the first line, followed by the request quote, one s
 
 `schemaVersion: 5` renders each ordinary message on one line. Presentation omits default `origin=unknown`, empty `files`, and the empty text of a currentRequest node. Actual bot origins, attachments, and missing-content flags remain. Timestamps, author IDs, participant names, original text, thread relationships, and routing coordinates are preserved.
 
+For requests sent through a trusted user app, `eventPayload.sourceAppId` preserves Slack’s original `app_id` through the queue, frozen envelope, and task presentation. Human messages omit this optional field, preserving compatibility with existing snapshots. Admission and reply checks use this field; message text cannot establish app identity.
+
 ```json
 {
   "schemaVersion": 5,
