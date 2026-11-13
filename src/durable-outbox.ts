@@ -22,7 +22,8 @@ export class DurableOutbox {
     this.prefix = 'relay:' + digest([config.multicaWorkspaceId,config.multicaProjectId,config.multicaAgentId,config.consumerUrl].join(':')) + ':outbox';
   }
   private async command(command: unknown[]): Promise<unknown> {
-    const response = await this.send(this.config.kvRestApiUrl, {
+    const send = this.send;
+    const response = await send(this.config.kvRestApiUrl, {
       method:'POST', headers:{authorization:'Bearer '+this.config.kvRestApiToken,'content-type':'application/json'},
       body:JSON.stringify(command), signal:AbortSignal.timeout(2000),
     });

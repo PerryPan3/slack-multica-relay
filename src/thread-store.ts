@@ -47,7 +47,8 @@ export class UpstashThreadStore implements ThreadStore {
   }
 
   private async command(command: string[]): Promise<unknown> {
-    const response = await this.fetchImpl(this.url, {
+    const send = this.fetchImpl;
+    const response = await send(this.url, {
       method: 'POST',
       headers: {
         authorization: `Bearer ${this.token}`,

@@ -125,6 +125,8 @@ function parsedEvent(value: unknown): SlackThreadEvent {
   return value as unknown as SlackThreadEvent;
 }
 function reason(error: unknown): string {
+  if (error instanceof Error && /^outbox_store_http_\d{3}$/.test(error.message)) return error.message;
+  if (error instanceof TypeError && error.message.includes('Illegal invocation')) return 'invalid_fetch_receiver';
   if (
     error instanceof Error &&
     ["TimeoutError", "AbortError"].includes(error.name)

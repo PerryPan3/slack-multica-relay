@@ -70,3 +70,11 @@ describe('durable recovery without polling messages',()=>{
     expect([...f.values.values()].some(v=>v.includes('thread_reply'))).toBe(true);
   });
 });
+
+it('does not bind the native fetch receiver to an outbox instance',async()=>{
+  const send:typeof fetch=async function(this:unknown){
+    if(this!==undefined && this!==globalThis)throw new TypeError('Illegal invocation');
+    return Response.json({result:1});
+  };
+  await expect(new DurableOutbox(config,send).schedule({message:'offline'})).resolves.toEqual(expect.any(String));
+});
