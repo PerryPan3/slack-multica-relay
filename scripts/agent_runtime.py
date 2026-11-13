@@ -250,8 +250,9 @@ def save_execution(path,outcome):
     temporary.replace(path)
 
 
-def envelope(text,tools,args,key,seconds):
+def envelope(text,tools,args,key,seconds,internal_failure=False):
     packet={"text":text,"seconds":seconds,"tools":list(tools.counts.values()),"reviews":tools.receipts,"models":[tools.model] if getattr(tools,"model",None) else []}
+    if internal_failure: packet["internalFailure"]=True
     body=base64.urlsafe_b64encode(json.dumps(packet,ensure_ascii=False).encode()).decode().rstrip("=")
     sig=hmac.new(key,("agent-result/1:"+args["ticket"]+":"+body).encode(),hashlib.sha256).hexdigest()
     return "relay-agent/1 "+body+"."+sig
@@ -498,7 +499,8 @@ def execute(args):
                 if home is not None:
                     # The per-run transport token is no longer valid after shutdown.
                     (home/"config.toml").write_text('approval_policy="never"\nsandbox_mode="read-only"\n')
-        reply=envelope(result,operations,args,key,int(time.time())-started)
+        reply=envelope(result,operations,args,key,int(time.time())-started,
+                       internal_failure=outcome["status"]!="completed" and not operations.receipts)
         db.execute("insert into replies values(?,?)",(identity,reply))
         db.commit()
         return {"reply":reply}

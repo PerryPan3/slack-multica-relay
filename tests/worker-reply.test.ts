@@ -340,3 +340,21 @@ it("renders native tools and model in the footer without activating injected men
   expect(JSON.stringify(message.blocks.filter(x=>x.type==="context"))).toContain("host-model");
   expect(agentSlackText("[PR](https://github.com/t/r/pull/1)")).toBe("<https://github.com/t/r/pull/1|PR>");
 });
+
+
+it("suppresses signed internal failures in channels but keeps private diagnostics and real answers",async()=>{
+  const packet={text:"任务暂时未完成，内部诊断已保留。",seconds:0,tools:[],reviews:[],internalFailure:true};
+  const body=Buffer.from(JSON.stringify(packet)).toString('base64url');
+  const output='relay-agent/1 '+body+'.'+createHmac('sha256','key').update('agent-result/1:ticket:'+body).digest('hex');
+  const group={...event,channelId:'C1'};
+  const settings={...config,allowedChannelIds:new Set(['D1','C1'])};
+  for(const text of [output,'本次未启动执行：请求校验、语义判断或读取任务状态未能完成。请在原线程重试。']){
+    const f=fixture(group); f.state.output=text;
+    expect(await deliverReply(f.job,settings,f.send,'bot-test',undefined,'key')).toBe('internal_failure_suppressed');
+    expect(f.state.posts).toBe(0);
+  }
+  const dm=fixture();dm.state.output=output;
+  expect(await deliverReply(dm.job,config,dm.send,undefined,undefined,'key')).toBe('sent');
+  const normal=fixture(group);normal.state.output='需要确认业务所说的活跃用户是否包含试用账号。';
+  expect(await deliverReply(normal.job,settings,normal.send,'bot-test')).toBe('sent');
+});

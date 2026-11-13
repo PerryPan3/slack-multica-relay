@@ -19,6 +19,20 @@ export interface ApiConfig {
   multicaProjectId: string;
   multicaAgentId: string;
 }
+// A stale or unavailable heartbeat is not an execution failure. Leave queued work untouched.
+export async function runtimeOnline(config: ApiConfig, runtimeId: string | undefined, fetchImpl: typeof fetch = fetch, now = Date.now()): Promise<boolean> {
+  if (!runtimeId) return false;
+  try {
+    const response = await api(config, '/api/runtimes', {redirect:'manual',signal:AbortSignal.timeout(5000)}, fetchImpl);
+    if (!response.ok) return false;
+    const rows: unknown = await response.json();
+    if (!Array.isArray(rows)) return false;
+    const runtime = rows.find(row => object(row) && row.id === runtimeId && row.workspace_id === config.multicaWorkspaceId);
+    if (!runtime || runtime.status !== 'online' || typeof runtime.last_seen_at !== 'string') return false;
+    const age = now - Date.parse(runtime.last_seen_at);
+    return age >= -5000 && age < 90000;
+  } catch { return false; }
+}
 export interface SlackReplyContext {
   type: "slack_reply_context";
   source: "agent_config";

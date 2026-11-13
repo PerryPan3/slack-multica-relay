@@ -38,6 +38,7 @@ export interface SlackThreadEvent {
   operation?: "dispatch" | "cancel";
 }
 export interface ThreadRouterConfig extends ApiConfig {
+  durableScheduler?: boolean;
   store: ThreadStore;
   readContext: (event: SlackThreadEvent, options?: ContextReadOptions) => Promise<ThreadContext>;
   slackReactionToken?: string;
@@ -275,7 +276,7 @@ export async function routeSlackThreadEvent(
         readReasons,reasons,messageReadMs:source.readStats?.messageReadMs,nameLookupCalls:source.readStats?.nameLookupCalls,
         nameReadMs:source.readStats?.nameReadMs,agentConfigMs,assemblyMs:Date.now()-assemblyStart,envelopeBytes:Buffer.byteLength(body),
       });
-      await config.store.setIfAbsent(preparedKey, body, 24 * 60 * 60);
+      await config.store.setIfAbsent(preparedKey, body, (config.durableScheduler ? 7 : 1) * 24 * 60 * 60);
       const saved = await config.store.get(preparedKey);
       if (!saved) throw new Error('invalid_thread_state');
       const firstContext=initialContext??structuredClone(output);

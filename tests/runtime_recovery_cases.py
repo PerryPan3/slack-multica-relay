@@ -53,7 +53,7 @@ class ProcessRecoveryTests(unittest.TestCase):
                  patch.object(runtime.slack_intent,'verified',return_value=claim),patch.object(runtime,'AgentTools',return_value=operations), \
                  patch.object(runtime,'prepare_assignments',return_value={}),patch.object(runtime,'running_gateway',gateway), \
                  patch.object(runtime,'prepare_home',home),patch.object(runtime,'run_model',model),patch.object(runtime.time,'sleep'), \
-                 patch.object(runtime,'envelope',side_effect=lambda result,*args:result):
+                 patch.object(runtime,'envelope',side_effect=lambda result,*args,**kwargs:result):
                 args={'ticket':'retry','event':{'text':'Continue the reviews.'}}
                 result=runtime.execute(args)
                 self.assertEqual(result,runtime.execute(args))
@@ -131,7 +131,7 @@ class ProcessRecoveryTests(unittest.TestCase):
             with patch.object(runtime.review_evidence,'PRIVATE',root),patch.object(runtime,'ROOT',root/'runs'), \
                  patch.object(runtime.slack_intent,'verified',return_value=claim),patch.object(runtime,'AgentTools',return_value=operations), \
                  patch.object(runtime,'prepare_assignments',return_value={}),patch.object(runtime,'running_gateway',gateway), \
-                 patch.object(runtime,'prepare_home',home),patch.object(runtime,'run_model',model),patch.object(runtime,'envelope',side_effect=lambda result,*args:result):
+                 patch.object(runtime,'prepare_home',home),patch.object(runtime,'run_model',model),patch.object(runtime,'envelope',side_effect=lambda result,*args,**kwargs:result):
                 runtime.execute({'ticket':'first','event':{'text':'Check this PR.'}})
                 profile.write_text('Lead with a plain-language conclusion.')
                 runtime.execute({'ticket':'second','event':{'text':'What changed?'}})

@@ -41,7 +41,7 @@ def verified(args,key):
     e=args["event"]
     binding=[e[k] for k in ("teamId","channelId","threadTs","messageTs","senderUserId")]+[e["mention"]["id"],e["text"]]
     if (c["binding"]!=binding or e["mention"]["type"]!="user" or
-            not -60<=time.time()-float(e["messageTs"])<=3600):
+            not -60<=time.time()-float(e["messageTs"])<=7*86400):
         raise ValueError("event")
     return c
 
@@ -239,15 +239,43 @@ def run_native(command,payload,timeout=2100,grace=20):
         for signum,handler in previous.items(): signal.signal(signum,handler)
 
 
+class PreparationUnavailable(Exception):
+    pass
+
+
+def internal_failure(args,key,code):
+    packet={"text":"任务暂时未完成，内部诊断已保留。", "seconds":0,"tools":[],"reviews":[],"internalFailure":True}
+    body=base64.urlsafe_b64encode(json.dumps(packet,ensure_ascii=False).encode()).decode().rstrip("=")
+    signature=hmac.new(key,("agent-result/1:"+args.get("ticket","")+":"+body).encode(),hashlib.sha256).hexdigest()
+    logs=review_evidence.PRIVATE/"runs/internal-failures"
+    logs.mkdir(parents=True,exist_ok=True,mode=0o700)
+    identity=hashlib.sha256(args.get("ticket","").encode()).hexdigest()
+    (logs/(identity+".json")).write_text(json.dumps({"code":code,"at":int(time.time())}))
+    return {"reply":"relay-agent/1 "+body+"."+signature}
+
+
 def dispatch(stage,args,key,run_review):
+    for attempt in range(3):
+        try:
+            return _dispatch(stage,args,key,run_review)
+        except PreparationUnavailable:
+            if attempt == 2: return internal_failure(args,key,"preparation_retry_exhausted")
+            time.sleep((15,45)[attempt])
+
+
+def _dispatch(stage,args,key,run_review):
+    validated=False
+    started=False
     try:
         claim=verified(args,key)
+        validated=True
         config=review_evidence.PRIVATE/"agent/config.json"
         native=json.loads(config.read_text()) if config.exists() else {}
         if native.get("enabled") and (not native.get("channels") or args["event"]["channelId"] in native["channels"]):
             if stage!="prepare":
                 raise ValueError("native request is already executing")
             python=json.loads(review_evidence.POLICY.read_text())["python"]
+            started=True
             process=run_native([python,str(Path(__file__).with_name("agent_runtime.py"))],json.dumps(args))
             if process.returncode:
                 logs=review_evidence.PRIVATE/"runs/native-startup"
@@ -256,12 +284,16 @@ def dispatch(stage,args,key,run_review):
                     {"phase":"execution" if getattr(process,'timed_out',False) else "startup",
                      "exit_code":process.returncode,"stderr":process.stderr[-16000:]}))
                 if getattr(process,'timed_out',False):
-                    return {"reply":"本次执行超过等待时限，已停止运行并保留私有日志。请在原线程继续，程序会先核对已有操作和审批回执，不重复提交。"}
-                return {"reply":"本次 Agent 未能启动（退出码 "+str(process.returncode)+"），私有启动日志已保留。原审查委托不会因此结束，可在原线程追问恢复。"}
+                    return internal_failure(args,key,"native_timeout")
+                return internal_failure(args,key,"native_process_failed")
             return json.loads(process.stdout)
         plan=frozen_plan(args["ticket"],stage,claim)
-    except (ValueError,TypeError,KeyError,AttributeError,OSError,sqlite3.Error,review_evidence.Unavailable,subprocess.SubprocessError,TimeoutError):
-        return {"reply":"本次未启动执行：请求校验、语义判断或读取任务状态未能完成。请在原线程重试。"}
+    except (ValueError,TypeError,KeyError,AttributeError,OSError,sqlite3.Error,review_evidence.Unavailable,subprocess.SubprocessError,TimeoutError) as error:
+        # Preparation has no external writes. Unknown execution outcomes must be reconciled, not blindly rerun.
+        transient=isinstance(error,(TimeoutError,ConnectionError,sqlite3.OperationalError,review_evidence.Unavailable,subprocess.TimeoutExpired,json.JSONDecodeError))
+        if validated and not started and transient:
+            raise PreparationUnavailable() from error
+        return internal_failure(args,key,"execution_outcome_unknown" if started else "request_preparation_rejected")
     mode=plan["route"]
     if mode in ("review","inspect","status"):
         if plan.get("targets"):

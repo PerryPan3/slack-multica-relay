@@ -1,6 +1,7 @@
 export interface RelayConfig {
   signingSecret: string;
   teamId: string;
+  durableScheduler?: boolean;
   targetUserIds: Set<string>;
   targetSubteamIds: Set<string>;
   allowedUserAppIds?: Set<string>;
@@ -41,6 +42,7 @@ export function loadRelayConfig(
     throw new Error("missing_mention_target");
   return {
     signingSecret: required(env, "SLACK_SIGNING_SECRET"),
+    durableScheduler: env.RELAY_DURABLE_SCHEDULER === "true",
     teamId: required(env, "SLACK_TEAM_ID"),
     allowedChannelIds: allowedChannels.ids,
     allowAllChannels: allowedChannels.all,

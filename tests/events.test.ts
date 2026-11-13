@@ -1,6 +1,6 @@
 import { createHmac } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { acceptSlack, consumeQueue, consumerFailure } from "../src/http.js";
+import { acceptSlack, consumeQueue, consumerFailure, recoverConfiguredMessages } from "../src/http.js";
 import { readContext } from "../src/slack-context.js";
 import { messageFingerprint } from "../src/context-envelope.js";
 vi.mock("@upstash/qstash", () => ({
@@ -57,6 +57,48 @@ const event = {
 };
 afterEach(() => vi.restoreAllMocks());
 describe("durable admission", () => {
+  it('moves existing verified QStash deliveries into durable storage without executing them',async()=>{
+    const send=vi.fn<typeof fetch>(async(url,init)=>{
+      expect(String(url)).toBe(env.KV_REST_API_URL);
+      expect(JSON.parse(String(init?.body))[0]).toBe('EVAL');
+      return Response.json({result:1});
+    });
+    const body=JSON.stringify({kind:'thread_reply',issueId:'i',attempt:3});
+    const response=await consumeQueue(new Request(env.RELAY_CONSUMER_URL,{method:'POST',body}),{...env,RELAY_DURABLE_SCHEDULER:'true'},send);
+    expect(await response.json()).toEqual({action:'accepted',transport:'redis'});
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+  it("acknowledges only persisted Redis jobs and does not consume QStash quota",async()=>{
+    const send=vi.fn<typeof fetch>(async(url,init)=>{
+      expect(String(url)).toBe(env.KV_REST_API_URL);
+      const command=JSON.parse(String(init?.body));expect(command[0]).toBe('EVAL');
+      expect(JSON.parse(command[5]).payload.text).toBe(event.text);
+      return Response.json({result:1});
+    });
+    expect((await acceptSlack(request(event),{...env,RELAY_DURABLE_SCHEDULER:'true'},send)).status).toBe(200);
+    expect(send).toHaveBeenCalledTimes(1);
+    const broken=vi.fn<typeof fetch>().mockResolvedValue(Response.json({}, {status:503}));
+    expect((await acceptSlack(request(event),{...env,RELAY_DURABLE_SCHEDULER:'true'},broken)).status).toBe(503);
+  });
+  it("recovers a missed Slack message from Slack itself and rechecks sender grants",async()=>{
+    for(const user of ['U2','U3']){
+      const calls:unknown[][]=[];
+      const send:typeof fetch=async(url,init)=>{
+        if(String(url).startsWith('https://slack.com/api/'))return Response.json({ok:true,messages:[{...event,user}]});
+        const command=JSON.parse(String(init?.body));calls.push(command);
+        return Response.json({result:command[0]==='GET'?null:1});
+      };
+      const settings={...env,SLACK_ALLOWED_SENDER_IDS:'U1',SLACK_CHANNEL_SENDER_GRANTS:'C1:U2',SLACK_CHANNEL_READ_TOKEN:'test',RELAY_RECOVERY_MESSAGES:'C1:'+event.ts};
+      if(user==='U2'){
+        await recoverConfiguredMessages(settings,send);
+        expect(calls.some(c=>c[0]==='EVAL')).toBe(true);
+      }else{
+        await expect(recoverConfiguredMessages(settings,send)).rejects.toThrow('recovery_source_rejected');
+        expect(calls.some(c=>c[0]==='EVAL')).toBe(false);
+      }
+    }
+  });
+
   it.each(["invalid_event","invalid_thread_state","ambiguous_issue_mapping","invalid_issue_scope","invalid_context_scope",
     "context_request_too_large","task_presentation_too_large","comment_lookup_limit"])("acknowledges permanent consumer rejection %s",async(code)=>{
     const response=consumerFailure(code);

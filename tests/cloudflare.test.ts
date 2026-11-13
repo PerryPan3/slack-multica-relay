@@ -77,3 +77,41 @@ describe('scheduled Multica renewal', () => {
     await expect(worker.scheduled({},env)).rejects.toThrow('invalid_renewal_receipt');
   });
 });
+
+
+describe('durable scheduler',()=>{
+  afterEach(()=>vi.unstubAllGlobals());
+  const settings={...env,RELAY_DURABLE_SCHEDULER:'true',MULTICA_RUNTIME_ID:'R1'};
+  const online=()=>[{id:'R1',workspace_id:'W1',status:'online',last_seen_at:new Date().toISOString()}];
+  it('does not touch queued jobs or retry counters while offline, then drains after recovery',async()=>{
+    let connected=false;
+    const send=vi.fn(async(url:unknown,init:RequestInit)=>{
+      if(String(url).endsWith('/api/runtimes'))return Response.json(connected?online():[{...online()[0],status:'offline'}]);
+      expect(JSON.parse(String(init.body))[0]).toBe('ZRANGEBYSCORE');
+      return Response.json({result:[]});
+    });
+    vi.stubGlobal('fetch',send);
+    for(let i=0;i<10;i++)await worker.scheduled({cron:'* * * * *'},settings);
+    expect(send).toHaveBeenCalledTimes(10);
+    expect(send.mock.calls.every(([url])=>String(url).endsWith('/api/runtimes'))).toBe(true);
+    connected=true;
+    await worker.scheduled({cron:'* * * * *'},settings);
+    expect(send).toHaveBeenCalledTimes(12);
+  });
+  it.each(['stale','wrong_workspace','wrong_runtime','missing','unavailable','invalid','future'])('waits without retries when heartbeat is %s',async kind=>{
+    const rows=online();
+    if(kind==='stale')rows[0]!.last_seen_at=new Date(Date.now()-90001).toISOString();
+    if(kind==='future')rows[0]!.last_seen_at=new Date(Date.now()+60000).toISOString();
+    if(kind==='wrong_workspace')rows[0]!.workspace_id='W2';
+    if(kind==='wrong_runtime')rows[0]!.id='R2';
+    const send=vi.fn(async()=>Response.json(kind==='invalid'?{}:kind==='missing'?[]:rows,{status:kind==='unavailable'?503:200}));
+    vi.stubGlobal('fetch',send);
+    await worker.scheduled({cron:'* * * * *'},settings);
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+  it('keeps daily token renewal independent of local connectivity',async()=>{
+    const send=vi.fn(async(_url:unknown)=>Response.json({renewed:true,expires_at:'2099-01-01T00:00:00Z'}));vi.stubGlobal('fetch',send);
+    await worker.scheduled({cron:'15 1 * * *'},settings);
+    expect(String(send.mock.calls[0]?.[0])).toContain('/api/tokens/current/renew');
+  });
+});
