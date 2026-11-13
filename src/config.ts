@@ -1,8 +1,10 @@
 export interface RelayConfig {
   signingSecret: string;
   teamId: string;
+  durableScheduler?: boolean;
   targetUserIds: Set<string>;
   targetSubteamIds: Set<string>;
+  allowedUserAppIds?: Set<string>;
   cancelKeywords: Set<string>;
   allowedChannelIds: Set<string>;
   allowAllChannels: boolean;
@@ -40,6 +42,7 @@ export function loadRelayConfig(
     throw new Error("missing_mention_target");
   return {
     signingSecret: required(env, "SLACK_SIGNING_SECRET"),
+    durableScheduler: env.RELAY_DURABLE_SCHEDULER === "true",
     teamId: required(env, "SLACK_TEAM_ID"),
     allowedChannelIds: allowedChannels.ids,
     allowAllChannels: allowedChannels.all,
@@ -50,6 +53,7 @@ export function loadRelayConfig(
     blockedSenderIds,
     targetUserIds,
     targetSubteamIds,
+    allowedUserAppIds: ids(env.SLACK_ALLOWED_USER_APP_IDS),
     cancelKeywords: cancelKeywords(env.SLACK_CANCEL_KEYWORDS),
     multicaApiBaseUrl: https(required(env, "MULTICA_API_BASE_URL")),
     multicaApiToken: required(env, "MULTICA_API_TOKEN"),

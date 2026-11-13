@@ -8,6 +8,12 @@ const c:ThreadContext={anchorTs:e.threadTs,cutoffTs:e.messageTs,capturedAt:'fixe
 const marker='<!-- relay-thread:scope:key -->';
 const cfg:ApiConfig={multicaApiBaseUrl:'https://multica.test',multicaApiToken:'secret',multicaWorkspaceId:'W1',multicaProjectId:'P1',multicaAgentId:'A1'};
 describe('readable tasks with preserved context',()=>{
+ it('preserves delegated app identity through freezing and issue presentation',()=>{
+  const event={...e,sourceAppId:'ATRUSTED'};
+  const frozen=buildEnvelope(event,c);
+  expect(JSON.parse(frozen).eventPayload.sourceAppId).toBe('ATRUSTED');
+  expect(readTaskEnvelope(formatTaskDescription(frozen,marker)).eventPayload.sourceAppId).toBe('ATRUSTED');
+ });
  it('uses readable bounded titles and scoped thread identity',()=>{
   expect(formatTaskTitle(e,'scope')).toMatch(/^Slack mention · 改期 & 取消 · \[[a-f0-9]{16}\]$/);
   expect(formatTaskTitle({...e,threadTs:'1788750612.844939'},'scope')).not.toBe(formatTaskTitle(e,'scope'));

@@ -4,6 +4,9 @@
 
 一个面向可靠交付的 Slack → Multica 桥接服务：接收经过签名验证的 Slack mention，经 QStash 持久化后，将每个 Slack thread 映射为一个 Multica Issue，并把后续消息作为 comment 送入同一个 Agent 工作流。
 
+
+Cloudflare 可选择 Redis 持久收件与定时重试模式，避免等待本机上线时持续消耗 QStash 消息额度；内部故障不向群聊发布，配置和边界见 [持久重试与群聊通知](docs/CONFIGURATION.md#cloudflare-持久重试与群聊通知)。
+
 ## 为什么需要它
 
 直接把 Slack event 转成 Agent 任务，很容易混淆“Slack 已确认”“任务已持久化”“Agent 已完成”和“回复已送达”。本项目把这些阶段拆开，并分别处理准入、重试、上下文、幂等与最终回复：

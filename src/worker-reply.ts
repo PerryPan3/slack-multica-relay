@@ -1,9 +1,10 @@
+import { DurableOutbox } from "./durable-outbox.js";
 import { businessPresentation, businessAllowed, type BusinessScope } from "./semantic-route.js";
 import { genericReviewReply, reviewPresentation, reviewStatistics } from "./github-review.js";
 import { compareTs } from "./context-envelope.js";
 import type { RelayConfig } from "./config.js";
 import { getIssue, listIssueRuns, findComment } from "./multica-api.js";
-import { findTargetMention } from "./mentions.js";
+import { findTargetMention, allowedSourceApp, isSupportedMessage } from "./mentions.js";
 import { readTaskEnvelope } from "./task-presentation.js";
 import {
   digest,
@@ -44,6 +45,10 @@ export async function scheduleReply(
   config: RelayConfig,
   send: typeof fetch,
 ) {
+  if (config.durableScheduler) {
+    await new DurableOutbox(config, send).schedule(job, job.attempt ? 120 : 0);
+    return;
+  }
   const response = await send(
     config.queueUrl + "/v2/publish/" + config.consumerUrl,
     {
@@ -56,6 +61,7 @@ export async function scheduleReply(
         ),
         "Upstash-Delay": job.attempt < 4 ? "6s" : "20s",
         "Upstash-Retries": "3",
+        "Upstash-Retry-Delay": "min(60000, 10000 * (retried + 1))",
       },
       body: JSON.stringify(job),
     },
@@ -101,12 +107,13 @@ export async function deliverReply(
   reviewWorkspaceSlug?: string,
   businessScope: BusinessScope = {},
 ) {
+  const maxAttempts = config.durableScheduler ? 5040 : MAX_REPLY_ATTEMPTS;
   if (
     !/^[a-f0-9-]{36}$/.test(job.issueId) ||
     ![job.thread, job.message].every((id) => /^[0-9a-f]{64}$/.test(id)) ||
     !Number.isInteger(job.attempt) ||
     job.attempt < 0 ||
-    job.attempt > MAX_REPLY_ATTEMPTS
+    job.attempt > maxAttempts
   )
     return "invalid_reply_job";
   const scope = digest(
@@ -143,6 +150,7 @@ export async function deliverReply(
     (state.ignoredThrough &&
       compareTs(e.messageTs, state.ignoredThrough) <= 0) ||
     e.teamId !== config.teamId ||
+    !allowedSourceApp(e.sourceAppId, config.allowedUserAppIds) ||
     config.allowAllSenders ||
     config.allowedSenderIds.size !== 1 ||
     !ownerId || !config.targetUserIds.has(ownerId) ||
@@ -180,7 +188,7 @@ export async function deliverReply(
   const completed = runs.filter((r) => r.status === "completed");
   let output: unknown;
   if (!completed.length) {
-    if (job.attempt < MAX_REPLY_ATTEMPTS) {
+    if (job.attempt < maxAttempts) {
       await scheduleReply({ ...job, attempt: job.attempt + 1 }, config, send);
       return "waiting";
     }
@@ -199,6 +207,9 @@ export async function deliverReply(
     Array.from(output).length > (frozen.context?.githubReviewTicket ? 256000 : 12000)
   )
     return "invalid_reply_text";
+  const internal = reviewPresentation(output,frozen.context?.githubReviewTicket,reviewKey)?.internalFailure;
+  const legacyFailure = /^(?:本次未启动执行：|本次 Agent 未能启动|本次执行超过等待时限|这次任务已失败或取消|等待执行结果的时间已到|这条消息没有启动 GitHub 审查)/u.test(output);
+  if (!e.channelId.startsWith('D') && (internal || legacyFailure)) return "internal_failure_suppressed";
   const headers = { authorization: "Bearer " + config.slackContextToken };
   const blockId = "relay-delivery-" + digest(ledger);
   async function readThread(oldest: string, latest?: string) {
@@ -224,6 +235,8 @@ export async function deliverReply(
       text?: string;
       bot_id?: string;
       app_id?: string;
+      bot_profile?: unknown;
+      subtype?: string;
       blocks?: { block_id?: string }[];
     }[];
   }
@@ -251,8 +264,8 @@ export async function deliverReply(
     !source ||
     (source.thread_ts || source.ts) !== e.threadTs ||
     source.user !== e.senderUserId ||
-    source.bot_id ||
-    source.app_id ||
+    !isSupportedMessage({...source,type:'message',channel:e.channelId},config.allowedUserAppIds) ||
+    source.app_id !== e.sourceAppId ||
     source.text !== e.text
   )
     return "source_changed";

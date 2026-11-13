@@ -8,6 +8,29 @@ sys.path.insert(0,str(Path(__file__).resolve().parents[1]/"scripts"))
 from agent_tools import readonly_sql, allowed_tool, AgentTools
 
 class NativeToolsTests(unittest.TestCase):
+    def test_review_planner_receives_interruption_context_and_durable_grants(self):
+        import json
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        agent=AgentTools.__new__(AgentTools)
+        agent.root=Path('/unused');agent.args={'ticket':'signed'};agent.key=b'key'
+        agent.claim={'binding':['are you ok?'],'history':[{'text':'review both PRs'}]}
+        agent.previous_execution={'status':'interrupted','error_code':'model_capacity'}
+        agent.reconcile_reviews=Mock(return_value={})
+        targets=['team/a/pull/1','team/b/pull/2']
+        tasks=[{'target':target,'status':'pending'} for target in targets]
+        def prepare(classify):
+            proposal=classify(targets,tasks)
+            return {item['target']:'grant' for item in proposal['actions'] if item['action']=='continue'}
+        ledger=SimpleNamespace(revoke_cancelled=Mock(),prepare=prepare,summary=lambda:tasks,planning_errors=[])
+        def classify(prompt,*args):
+            payload=json.loads(prompt[prompt.index('{"current_request"'):])
+            self.assertEqual(payload['previous_execution'],agent.previous_execution)
+            self.assertEqual(payload['tasks'],tasks)
+            return json.dumps({'actions':[{'target':t,'action':'continue'} for t in targets]})
+        with patch('agent_tools.ReviewTasks',return_value=ledger),patch('review_evidence.isolated_turn',side_effect=classify):
+            self.assertEqual(set(agent.prepare_reviews()['continue_to_verdict']),set(targets))
+
     def test_pr_material_includes_pinned_repository_knowledge_and_reports_read_failure(self):
         from types import SimpleNamespace
         from unittest.mock import Mock

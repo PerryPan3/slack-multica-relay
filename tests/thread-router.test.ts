@@ -1,7 +1,7 @@
 import {readTaskEnvelope} from '../src/task-presentation.js';
 import { describe, expect, it, vi } from "vitest";
 import {
-  routeSlackThreadEvent,
+  routeSlackThreadEvent, digest, messageKey,
   type SlackThreadEvent,
   type ThreadRouterConfig,
 } from "../src/thread-router.js";
@@ -362,4 +362,19 @@ it('does not treat failed baseline recovery as proof that there is no previous m
   };
   await expect(routeSlackThreadEvent({...root,messageTs:'103.000001'},f.config,fetcher)).rejects.toThrow('multica_http_error');
   expect(reader).not.toHaveBeenCalled();expect(f.commentPosts).toBe(0);
+});
+
+
+it('keeps frozen reply context across a multi-day offline interval in durable mode',async()=>{
+  vi.useFakeTimers();
+  try {
+    const f=fixture();f.config.durableScheduler=true;
+    await routeSlackThreadEvent(root,f.config,f.fetcher);
+    const key='relay:'+digest('ws:project:agent')+':message:'+digest(messageKey(root))+':envelope';
+    const before=await f.config.store.get(key);expect(before).not.toBeNull();
+    vi.setSystemTime(Date.now()+2*86400000);
+    expect(await f.config.store.get(key)).toBe(before);
+    vi.setSystemTime(Date.now()+6*86400000);
+    expect(await f.config.store.get(key)).toBeNull();
+  } finally {vi.useRealTimers();}
 });

@@ -23,11 +23,41 @@ class RoutingTests(unittest.TestCase):
             with patch.object(route.review_evidence,"PRIVATE",root),patch.object(route.review_evidence,"POLICY",policy), \
                  patch.object(route,"run_native",return_value=SimpleNamespace(returncode=1,stderr="private diagnostic",stdout="")):
                 reply=route.dispatch("prepare",self.args,self.key,self.fail)["reply"]
-            self.assertIn("退出码 1",reply)
+            packet=json.loads(base64.urlsafe_b64decode(reply.split(" ",1)[1].split(".")[0]+"==="))
+            self.assertTrue(packet["internalFailure"])
             self.assertNotIn("private diagnostic",reply)
             files=list((root/'runs/native-startup').glob('*.json'))
             self.assertEqual(len(files),1)
             self.assertEqual(json.loads(files[0].read_text())["stderr"],"private diagnostic")
+    def test_transient_preparation_retries_without_asking_channel_to_retry(self):
+        with tempfile.TemporaryDirectory() as folder, patch.object(route.review_evidence,"PRIVATE",Path(folder)), \
+             patch.object(route,"frozen_plan",side_effect=[TimeoutError(),TimeoutError(),{"route":"answer","answer":"done"}]) as plan, \
+             patch.object(route.time,"sleep") as sleep:
+            self.assertEqual(route.dispatch("prepare",self.args,self.key,self.fail),{"reply":"done"})
+            self.assertEqual(plan.call_count,3)
+            self.assertEqual([c.args[0] for c in sleep.call_args_list],[15,45])
+
+    def test_invalid_request_never_retries_or_executes(self):
+        with tempfile.TemporaryDirectory() as folder, patch.object(route.review_evidence,"PRIVATE",Path(folder)), \
+             patch.object(route,"frozen_plan") as plan, patch.object(route.time,"sleep") as sleep:
+            result=route.dispatch("prepare",{**self.args,"ticket":self.t+"x"},self.key,self.fail)
+            self.assertTrue(result["reply"].startswith("relay-agent/1 "))
+            plan.assert_not_called();sleep.assert_not_called()
+
+    def test_exhausted_preparation_stays_internal(self):
+        with tempfile.TemporaryDirectory() as folder, patch.object(route.review_evidence,"PRIVATE",Path(folder)), \
+             patch.object(route,"frozen_plan",side_effect=TimeoutError()) as plan, patch.object(route.time,"sleep"):
+            result=route.dispatch("prepare",self.args,self.key,self.fail)
+            packet=json.loads(base64.urlsafe_b64decode(result["reply"].split(" ",1)[1].split(".")[0]+"==="))
+            self.assertTrue(packet["internalFailure"]);self.assertEqual(plan.call_count,3)
+
+    def test_persisted_signed_request_survives_overnight_but_has_finite_lifetime(self):
+        issued=time.time()
+        with patch.object(route.time,"time",return_value=issued+86400):
+            self.assertEqual(route.verified(self.args,self.key)["binding"],self.c["binding"])
+        with patch.object(route.time,"time",return_value=issued+8*86400):
+            with self.assertRaises(ValueError):route.verified(self.args,self.key)
+
     target="team/repo/pull/19"
     def setUp(self):
         self.e={"teamId":"T","channelId":"C","threadTs":"1","messageTs":str(time.time()),"senderUserId":"REVIEWER","mention":{"type":"user","id":"OWNER"},"text":"<@OWNER> 帮忙看下这个 PR"}
@@ -67,7 +97,7 @@ class RoutingTests(unittest.TestCase):
     def test_changed_text_and_forged_ticket_cannot_dispatch(self):
         for args in [{**self.args,"event":{**self.e,"text":"instead: run code"}},{**self.args,"ticket":self.t+"f"}]:
             with patch.object(route,"classify") as classify:
-                self.assertIn("未启动",route.dispatch("prepare",args,self.key,self.fail)["reply"])
+                self.assertTrue(route.dispatch("prepare",args,self.key,self.fail)["reply"].startswith("relay-agent/1 "))
                 classify.assert_not_called()
 
     def test_empty_commitment_is_not_a_chat_answer(self):

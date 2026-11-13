@@ -17,6 +17,98 @@ import agent_runtime as runtime
 
 
 class ProcessRecoveryTests(unittest.TestCase):
+    def test_failed_turn_preserves_capacity_error_instead_of_exit_code(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder)
+            event={'type':'turn.failed','error':{'message':'Selected model is at capacity. Please try a different model.'}}
+            command=[sys.executable,'-c',f'import json,sys;print({json.dumps(json.dumps(event))});sys.exit(1)',
+                     '-o',str(root/'final')]
+            with (root/'events').open('w') as out,(root/'errors').open('w') as err:
+                with self.assertRaises(runtime.ModelFailure) as caught:
+                    runtime.run_model(command,input='',text=True,stdout=out,stderr=err,cwd=root,env={},timeout=3)
+            self.assertEqual(caught.exception.code,'model_capacity')
+            self.assertTrue(caught.exception.retryable)
+            self.assertIn('容量',runtime.execution_failure(caught.exception))
+
+    def test_retry_uses_same_session_and_reconciles_writes(self):
+        from contextlib import contextmanager
+        @contextmanager
+        def gateway(*args):yield 1234,'nonce'
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder);(root/'review').mkdir();(root/'review/key').write_text('test-key')
+            claim={'binding':['T','D','1'],'history':[],'partial':False,'targets':[],'local':False}
+            operations=SimpleNamespace(counts={},receipts=[{'url':'https://example.test/existing-review'}],
+                services=lambda:[],reconcile_reviews=Mock(return_value={}))
+            commands=[];payloads=[]
+            def model(command,**kwargs):
+                commands.append(command);payloads.append(kwargs['input'])
+                kwargs['stdout'].write(json.dumps({'type':'thread.started','thread_id':'original-session'})+'\n')
+                kwargs['stdout'].flush()
+                if len(commands)==1:raise runtime.ModelFailure({'message':'Selected model is at capacity. Please try a different model.'})
+                Path(command[command.index('-o')+1]).write_text('Completed the remaining work.')
+                return SimpleNamespace(returncode=0)
+            def home(directory,*args):
+                path=directory/'home';path.mkdir(exist_ok=True);return path
+            with patch.object(runtime.review_evidence,'PRIVATE',root),patch.object(runtime,'ROOT',root/'runs'), \
+                 patch.object(runtime.slack_intent,'verified',return_value=claim),patch.object(runtime,'AgentTools',return_value=operations), \
+                 patch.object(runtime,'prepare_assignments',return_value={}),patch.object(runtime,'running_gateway',gateway), \
+                 patch.object(runtime,'prepare_home',home),patch.object(runtime,'run_model',model),patch.object(runtime.time,'sleep'), \
+                 patch.object(runtime,'envelope',side_effect=lambda result,*args,**kwargs:result):
+                args={'ticket':'retry','event':{'text':'Continue the reviews.'}}
+                result=runtime.execute(args)
+                self.assertEqual(result,runtime.execute(args))
+            self.assertEqual(len(commands),2)
+            self.assertIn('original-session',commands[1])
+            operations.reconcile_reviews.assert_called_once()
+            self.assertIn('existing-review',payloads[1])
+            outcome=json.loads(next((root/'runs').glob('*/last-execution.json')).read_text())
+            self.assertEqual(outcome['status'],'completed')
+            self.assertEqual(outcome['attempts'],2)
+            self.assertEqual(outcome['retries'][0]['error_code'],'model_capacity')
+
+    def test_unknown_and_usage_errors_do_not_retry(self):
+        for message in ('Quota exceeded. Check your plan and billing details.','Invalid API key','unknown failure'):
+            error=runtime.ModelFailure({'message':message})
+            self.assertFalse(error.retryable)
+        limited=runtime.ModelFailure({'message':'exceeded retry limit, last status: 429 Too Many Requests'})
+        self.assertEqual(limited.code,'model_rate_limit')
+        self.assertFalse(limited.retryable)
+        self.assertIn('429',runtime.execution_failure(limited))
+
+    def test_recovery_stops_at_budget_and_does_not_retry_permanent_errors(self):
+        for message,expected in [('Selected model is at capacity. Please try a different model.',3),
+                                 ('Quota exceeded. Check your plan and billing details.',1)]:
+            with self.subTest(message=message),tempfile.TemporaryDirectory() as folder:
+                root=Path(folder);outcome={}
+                operations=SimpleNamespace(receipts=[],reconcile_reviews=Mock(return_value={}))
+                command=['codex','exec','--skip-git-repo-check','--json','-o',str(root/'final'),'-']
+                with patch.object(runtime,'run_model',side_effect=runtime.ModelFailure({'message':message})) as run, \
+                     patch.object(runtime.time,'sleep') as sleep:
+                    with self.assertRaises(runtime.ModelFailure):
+                        runtime.recover_model(command,payload='test',directory=root,identity='request',session_file=root/'session',
+                            outcome=outcome,outcome_file=root/'outcome',operations=operations,home=root)
+                self.assertEqual(run.call_count,expected)
+                self.assertEqual(sleep.call_count,expected-1)
+
+    def test_failed_event_is_not_reported_as_success_even_with_partial_final(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder)
+            code="import json,pathlib,sys,time;pathlib.Path(sys.argv[2]).write_text('partial');print(json.dumps({'type':'turn.failed','error':{'message':'failure'}}),flush=True);time.sleep(60)"
+            command=[sys.executable,'-c',code,'-o',str(root/'final')]
+            with (root/'events').open('w') as out,(root/'errors').open('w') as err:
+                started=time.monotonic()
+                with self.assertRaises(runtime.ModelFailure):
+                    runtime.run_model(command,input='',text=True,stdout=out,stderr=err,cwd=root,env={},timeout=3)
+                self.assertLess(time.monotonic()-started,2)
+
+    def test_runtime_inherits_configured_priority_service(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder);(root/'.codex').mkdir()
+            (root/'.codex/config.toml').write_text('model="test-model"\nmodel_reasoning_effort="high"\nservice_tier="priority"\n')
+            with patch.object(runtime.Path,'home',return_value=root):
+                home=runtime.prepare_home(root,{},1234,'nonce',SimpleNamespace())
+            self.assertEqual(runtime.tomllib.loads((home/'config.toml').read_text())['service_tier'],'priority')
+
     def test_new_request_and_resumed_thread_receive_the_current_profile(self):
         from contextlib import contextmanager
         @contextmanager
@@ -39,7 +131,7 @@ class ProcessRecoveryTests(unittest.TestCase):
             with patch.object(runtime.review_evidence,'PRIVATE',root),patch.object(runtime,'ROOT',root/'runs'), \
                  patch.object(runtime.slack_intent,'verified',return_value=claim),patch.object(runtime,'AgentTools',return_value=operations), \
                  patch.object(runtime,'prepare_assignments',return_value={}),patch.object(runtime,'running_gateway',gateway), \
-                 patch.object(runtime,'prepare_home',home),patch.object(runtime,'run_model',model),patch.object(runtime,'envelope',side_effect=lambda result,*args:result):
+                 patch.object(runtime,'prepare_home',home),patch.object(runtime,'run_model',model),patch.object(runtime,'envelope',side_effect=lambda result,*args,**kwargs:result):
                 runtime.execute({'ticket':'first','event':{'text':'Check this PR.'}})
                 profile.write_text('Lead with a plain-language conclusion.')
                 runtime.execute({'ticket':'second','event':{'text':'What changed?'}})

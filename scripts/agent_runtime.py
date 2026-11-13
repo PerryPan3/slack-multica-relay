@@ -68,6 +68,7 @@ def prepare_assignments(operations):
 
 
 def execution_failure(error):
+    if isinstance(error,ModelFailure):return error.public_reason
     if isinstance(error,ProfileError):return str(error)
     if isinstance(error,RuntimeInterrupted):
         return "执行进程收到信号 "+str(error.signum)+"，进度已保留"
@@ -83,6 +84,20 @@ class RuntimeInterrupted(Exception):
     def __init__(self,signum):
         self.signum=signum
         super().__init__("Runtime received signal "+str(signum))
+
+
+class ModelFailure(Exception):
+    def __init__(self,error):
+        message=str(error.get('message','')) if isinstance(error,dict) else ''
+        # CLI 0.155 maps both server_is_overloaded and slow_down to this message.
+        self.retryable=message=='Selected model is at capacity. Please try a different model.'
+        self.code='model_capacity' if self.retryable else 'model_turn_failed'
+        self.public_reason=('模型服务返回容量或节流错误，自动恢复仍未完成' if self.retryable
+                            else '模型调用失败，具体诊断已保存在私有运行记录')
+        if message.startswith('exceeded retry limit, last status: 429'):
+            self.code='model_rate_limit'
+            self.public_reason='模型服务返回 HTTP 429 限流，Codex 内部重试后仍失败'
+        super().__init__(message[:2000] or 'Model turn failed without an error message.')
 
 
 @contextmanager
@@ -124,6 +139,7 @@ def run_model(command,*,input,text,stdout,stderr,cwd,env,timeout):
         source.close()
         raise
     completed_at=None
+    failure=None
     try:
         with Path(stdout.name).open() as events:
             while True:
@@ -137,7 +153,9 @@ def run_model(command,*,input,text,stdout,stderr,cwd,env,timeout):
                     try: event=json.loads(line)
                     except ValueError: continue
                     if event.get('type')=='turn.completed': completed_at=time.monotonic()
+                    if event.get('type')=='turn.failed': failure=ModelFailure(event.get('error',{}))
                 code=process.poll()
+                if failure is not None: raise failure
                 if completed_at is not None and final.exists() and final.stat().st_size>0 and (code is not None or time.monotonic()-completed_at>=1):
                     return SimpleNamespace(returncode=0)
                 if code is not None:
@@ -150,6 +168,42 @@ def run_model(command,*,input,text,stdout,stderr,cwd,env,timeout):
     finally:
         source.close()
         stop_process_group(process)
+
+
+def recover_model(command,*,payload,directory,identity,session_file,outcome,outcome_file,operations,home):
+    started=time.time();monotonic=time.monotonic()
+    retry_context=None
+    for attempt in range(3):
+        remaining=1800-max(time.time()-started,time.monotonic()-monotonic)
+        if remaining<=0:raise subprocess.TimeoutExpired(command[0],1800)
+        current=[command[0],'exec']
+        if session_file.exists():current+=['resume',session_file.read_text().strip()]
+        current+=command[command.index('--skip-git-repo-check'):]
+        suffix='' if attempt==0 else '.attempt-'+str(attempt+1)
+        events=directory/(identity+suffix+'.events.jsonl')
+        text=payload if retry_context is None else payload+'\n恢复上下文：'+json.dumps(retry_context,ensure_ascii=False)
+        outcome.update(phase='model',attempts=attempt+1)
+        save_execution(outcome_file,outcome)
+        try:
+            with events.open('w') as output,(directory/(identity+suffix+'.stderr')).open('w') as errors:
+                run=run_model(current,input=text,text=True,stdout=output,stderr=errors,cwd=directory,
+                              env={'CODEX_HOME':str(home)},timeout=remaining)
+            if run.returncode:raise subprocess.CalledProcessError(run.returncode,current[0])
+            return
+        except ModelFailure as error:
+            if not error.retryable or attempt==2:raise
+            delay=(15,45)[attempt]
+            outcome.setdefault('retries',[]).append({'error_code':error.code,'delay_seconds':delay})
+            outcome['phase']='retry_wait'
+            save_execution(outcome_file,outcome)
+            if max(time.time()-started,time.monotonic()-monotonic)+delay>=1800:raise
+            time.sleep(delay)
+            # Reconcile an interrupted write before asking the model to continue the same task.
+            errors=operations.reconcile_reviews()
+            retry_context={'reason':error.code,'receipts':operations.receipts,'reconciliation_errors':errors,
+                           'instruction':'沿用原任务和会话继续未完成的工作。先核对已有回执；结果不明的写入必须先查询状态，不得直接重放。'}
+        finally:
+            persist_session(events,session_file)
 
 
 def tool_failure(error):
@@ -196,8 +250,9 @@ def save_execution(path,outcome):
     temporary.replace(path)
 
 
-def envelope(text,tools,args,key,seconds):
+def envelope(text,tools,args,key,seconds,internal_failure=False):
     packet={"text":text,"seconds":seconds,"tools":list(tools.counts.values()),"reviews":tools.receipts,"models":[tools.model] if getattr(tools,"model",None) else []}
+    if internal_failure: packet["internalFailure"]=True
     body=base64.urlsafe_b64encode(json.dumps(packet,ensure_ascii=False).encode()).decode().rstrip("=")
     sig=hmac.new(key,("agent-result/1:"+args["ticket"]+":"+body).encode(),hashlib.sha256).hexdigest()
     return "relay-agent/1 "+body+"."+sig
@@ -373,6 +428,8 @@ def prepare_home(directory,claim,port,nonce,operations):
         +'[[hooks.PreToolUse]]\n[[hooks.PreToolUse.hooks]]\ntype="command"\ncommand='
         +json.dumps("/usr/bin/python3 -c "+shlex.quote(hook))+'\n')
     config += tool_policy(claim.get("local"))
+    if settings.get('service_tier') is not None:
+        config='service_tier='+json.dumps(settings['service_tier'])+'\n'+config
     (home/"config.toml").write_text(config)
     return home
 
@@ -411,6 +468,7 @@ def execute(args):
                 profile=load_profile(review_evidence.PRIVATE)
                 outcome['profile_sha256']=profile['sha256']
                 operations=AgentTools(args,key,directory)
+                operations.previous_execution=previous
                 review_assignments=prepare_assignments(operations)
                 with running_gateway(operations,directory/(identity+".audit.jsonl")) as (port,nonce):
                     home=prepare_home(directory,claim,port,nonce,operations)
@@ -424,10 +482,8 @@ def execute(args):
                         "previous_execution":previous,"owner_local_allowed":bool(claim.get("local"))},ensure_ascii=False)
                     outcome["phase"]="model"
                     save_execution(outcome_file,outcome)
-                    with (directory/(identity+".events.jsonl")).open("w") as output, (directory/(identity+".stderr")).open("w") as errors:
-                        run=run_model(command,input=payload,text=True,stdout=output,stderr=errors,cwd=directory,
-                                      env={"CODEX_HOME":str(home)},timeout=1800)
-                    if run.returncode: raise subprocess.CalledProcessError(run.returncode,command[0])
+                    recover_model(command,payload=payload,directory=directory,identity=identity,session_file=session_file,
+                                  outcome=outcome,outcome_file=outcome_file,operations=operations,home=home)
                     if not final_file.exists(): raise RuntimeError("Native Agent execution did not finish. Inspect the private run log.")
                     result=final_file.read_text().strip()
                     if not result: raise RuntimeError("Native Agent returned an empty answer.")
@@ -435,15 +491,16 @@ def execute(args):
             except Exception as error:
                 outcome.update(status="interrupted",reason=execution_failure(error),
                                error_type=type(error).__name__,diagnostic=tool_failure(error)['error'])
+                if isinstance(error,ModelFailure):outcome['error_code']=error.code
                 result="这次没能完成："+outcome["reason"]+"。"+("已经提交的审批见下方链接，其余部分还没有完成。" if operations.receipts else "已有进度已保留。你可以在这个线程继续追问，我会先核对之前的结果再接着处理。")
             finally:
                 outcome["finished"]=int(time.time())
                 save_execution(outcome_file,outcome)
-                persist_session(directory/(identity+".events.jsonl"),session_file)
                 if home is not None:
                     # The per-run transport token is no longer valid after shutdown.
                     (home/"config.toml").write_text('approval_policy="never"\nsandbox_mode="read-only"\n')
-        reply=envelope(result,operations,args,key,int(time.time())-started)
+        reply=envelope(result,operations,args,key,int(time.time())-started,
+                       internal_failure=outcome["status"]!="completed" and not operations.receipts)
         db.execute("insert into replies values(?,?)",(identity,reply))
         db.commit()
         return {"reply":reply}

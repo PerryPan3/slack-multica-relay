@@ -1,7 +1,18 @@
-import { acceptSlack, consumeQueue, json } from './http.js';
+import { DurableOutbox } from "./durable-outbox.js";
+import { loadRelayConfig } from "./config.js";
+import { runtimeOnline } from "./multica-api.js";
+import { acceptSlack, consumeQueue, json, processRelayPayload, recoverConfiguredMessages } from './http.js';
 
 export default {
-  async scheduled(_event: unknown, env: Record<string, string | undefined>): Promise<void> {
+  async scheduled(_event: {cron?: string}, env: Record<string, string | undefined>): Promise<void> {
+    if (env.RELAY_DURABLE_SCHEDULER === 'true' && _event.cron !== '15 1 * * *') {
+      const config = loadRelayConfig(env);
+      if (!await runtimeOnline(config, env.MULTICA_RUNTIME_ID)) return;
+      try { await recoverConfiguredMessages(env); }
+      catch { console.warn('relay_recovery',{action:'retry'}); }
+      await new DurableOutbox(config).drain(raw => processRelayPayload(raw, env));
+      return;
+    }
     const baseUrl = new URL(env.MULTICA_API_BASE_URL ?? '');
     if (baseUrl.protocol !== 'https:' || baseUrl.username || baseUrl.password || !env.MULTICA_API_TOKEN)
       throw new Error('invalid_renewal_configuration');

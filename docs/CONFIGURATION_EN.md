@@ -44,6 +44,7 @@ Slack IDs are comma-separated uppercase identifiers. `SLACK_TARGET_USER_IDS` and
 | `SLACK_ALLOWED_CHANNEL_IDS` | Yes | Comma-separated Channel IDs. Use `all` only when every channel is intentionally allowed; missing or empty values prevent startup. |
 | `SLACK_BLOCKED_CHANNEL_IDS` | No | Channel IDs that must never trigger, including when the allowlist is `all`. |
 | `SLACK_ALLOWED_SENDER_IDS` | No | User IDs allowed to trigger. Missing or empty values mean `all`; an owner-only deployment should set the exact owner ID. |
+| `SLACK_ALLOWED_USER_APP_IDS` | No | Comma-separated IDs of trusted apps that send requests as users. Empty or absent rejects all app messages. |
 | `SLACK_BLOCKED_SENDER_IDS` | No | User IDs that must never trigger. |
 | `SLACK_BOT_TOKEN` | Conditional | Preferred identity for reaction add/read/remove; requires reactions:read and reactions:write. |
 | `SLACK_USER_TOKEN` | Conditional | Used for reactions when Bot is not configured. |
@@ -52,6 +53,8 @@ Slack IDs are comma-separated uppercase identifiers. `SLACK_TARGET_USER_IDS` and
 | `SLACK_REACTION_NAME` | Yes | Slack emoji shortcode without colons, such as `eyes`. The reaction confirms Relay persistence, not Agent completion. |
 
 The Slack App Request URL is `https://<deployment-host>/api/slack/events`. Subscribe only to message events required by the selected conversation types. Install the App in private channels when needed.
+
+Delegated requests must carry a verified `app_id` and the sender’s `user`, without `bot_id`, `bot_profile`, bot subtypes, or Relay delivery markers. App trust does not widen sender, conversation, or task permissions. Ingress, queue consumption, and final replies recheck app trust. Before replying, the Relay rereads the source and verifies the exact app ID, sender, and text. Display names and “Sent using Claude” text do not establish identity.
 
 | Variable | Required | Value and source |
 | --- | --- | --- |
@@ -264,10 +267,26 @@ Review material is paged at pinned base/head revisions. If GitHub cannot return 
 
 AWS identity and S3 object metadata use existing host credentials through bounded read operations. Configured profiles alone do not prove access. This does not execute `aws s3 sync --dryrun`; missing credentials inside an isolated owner command do not establish missing host access.
 
-Model execution has a 30-minute watchdog and each thread runs serially. The outer dispatcher allows additional preparation and cleanup time. It requests graceful shutdown before killing the task process tree. A completed model turn and final response trigger cleanup even if CLI background workers hang. Transient read errors retry once; writes never retry automatically. The Worker waits up to roughly 60 minutes. Private `runs/native-agent` stores session, tool audit and signed results for continuation and replay. Failures are reported as failures. The host cannot execute while asleep, and the existing one-hour signed-request expiry still applies; recovery beyond that window is not guaranteed.
+Native sessions inherit the configured Codex model, reasoning effort and `service_tier`. An explicit model-capacity failure permits at most two resumptions, after 15 and 45 seconds, within the same session and overall 30-minute deadline. The runtime does not switch models. It reconciles existing review receipts before resuming and never blindly repeats an uncertain write. HTTP 429 after the CLI has exhausted its own retry budget is reported separately without another retry loop; other model errors are not automatically retried. Some CLI versions map both overload and throttling to the capacity message, so it does not prove account-quota exhaustion. Each attempt retains its own private event log; the execution record includes attempt counts and error classification.
+
+Model execution has a 30-minute watchdog and each thread runs serially. The outer dispatcher allows additional preparation and cleanup time. It requests graceful shutdown before killing the task process tree. A completed model turn and final response trigger cleanup even if CLI background workers hang. Transient read errors retry once; writes never retry automatically. The Worker waits up to roughly 60 minutes. Private `runs/native-agent` stores session, tool audit and signed results for continuation and replay. Failures are reported as failures. The host cannot execute while asleep, and persisted semantic requests expire after seven days and require a new request beyond that window.
 
 The private native session disables automatic app/plugin tool inheritance. Configured read MCPs remain accessible through the request-bound host gateway. GitHub reads and review submissions use the host connection; remote connector IP restrictions do not establish that the host lacks repository access.
 
 When owner local self-assignment and GitHub review are enabled, admitted owner self-mentions retain formal review capability in every permitted self-assignment conversation. Colleagues remain restricted to their configured channels.
 
-Old review receipts reconcile independently: one failure cannot stop other targets or business queries. Failed authorization preparation retains read tools and offers a retry within the same request. Private session state carries the execution phase and interruption reason into follow-ups; startup diagnostics remain private. GitHub drafts carry a stable task marker from creation, allowing recovery after losing their local IDs. See [reliability testing](RELIABILITY-TESTING.md) for coverage and operational limits.
+Old review receipts reconcile independently: one failure cannot stop other targets or business queries. Failed authorization preparation retains read tools and offers a retry within the same request. Private session state carries the execution phase and interruption reason into both follow-up planning and execution. Health checks and nudges after interruption continue pending review grants; explicit read-only, pause, cancellation and unrelated requests retain their respective intent; startup diagnostics remain private. GitHub drafts carry a stable task marker from creation, allowing recovery after losing their local IDs. See [reliability testing](RELIABILITY-TESTING.md) for coverage and operational limits.
+
+## Cloudflare durable recovery and channel notifications
+
+With `RELAY_DURABLE_SCHEDULER=true`, signed and admitted Slack requests are acknowledged only after the minimal event and due index are atomically stored in Redis. Configure `* * * * *` alongside the existing token-renewal schedule `15 1 * * *`. This mode does not publish a QStash message for each admission or result check. Existing QStash deliveries retain signature and policy verification. Other platforms keep the default QStash transport.
+
+Each cron invocation processes at most eight jobs, two concurrently, with expiring exclusive leases. Transient failures retry after one to five minutes, at most 24 times. Exhausted jobs retain a private failure record without posting operational errors to channels. Pending execution results are checked every two minutes for at most seven days. Persisted semantic request signatures also expire after seven days; signature, sender, and conversation checks still apply. Redis failure prevents successful admission acknowledgement.
+
+Before external execution, preparation timeouts, transient state reads, and invalid model JSON receive at most three attempts with 15- and 45-second delays. Invalid signatures, deterministic configuration errors, and uncertain execution outcomes are not blindly rerun. Signed results mark purely operational failures with `internalFailure`; the Worker suppresses these in channels. Direct-message diagnostics, useful business clarification, and confirmed partial approvals remain deliverable.
+
+An operator can set `RELAY_RECOVERY_MESSAGES` to up to ten exact missed message coordinates, `C…:seconds.microseconds`, separated by commas. Cron rereads Slack, rechecks sender, app, and channel permissions, then queues the event and records recovery. Remove the configuration after recovery. No public unsigned replay endpoint is exposed.
+
+Set `MULTICA_RUNTIME_ID` to the dedicated runtime. Each minute, the scheduler only checks the workspace runtime list until this runtime is online with a heartbeat less than 90 seconds old. Offline, stale, missing, or unavailable status leaves jobs and failure counters untouched, without model calls or QStash deliveries. Processing resumes after connectivity returns. Daily token renewal remains independent; pending requests are retained for seven days.
+
+In durable mode, frozen request context is also retained for seven days so replies can validate the original request after multi-day offline intervals.

@@ -27,6 +27,8 @@ Keep the original marker on the first line, followed by the request quote, one s
 
 `schemaVersion: 5` renders each ordinary message on one line. Presentation omits default `origin=unknown`, empty `files`, and the empty text of a currentRequest node. Actual bot origins, attachments, and missing-content flags remain. Timestamps, author IDs, participant names, original text, thread relationships, and routing coordinates are preserved.
 
+For requests sent through a trusted user app, `eventPayload.sourceAppId` preserves Slack’s original `app_id` through the queue, frozen envelope, and task presentation. Human messages omit this optional field, preserving compatibility with existing snapshots. Admission and reply checks use this field; message text cannot establish app identity.
+
 ```json
 {
   "schemaVersion": 5,
@@ -85,7 +87,7 @@ If A is missing from the current Slack result, restore its text, author, and att
 
 `schemaVersion: 5` versions task bodies, while v3 `:sent-context-index` versions the internal Relay cache. Deploying the new Relay enables the policy without adding environment variables, changing Agent Instructions, or rebinding the final-reply Skill.
 
-New mentions use the new rules. An event reuses its frozen envelope while the 24-hour cache is valid, including legacy formats. After expiry, reconcile persisted delivery first; fetch context again only if preparation remains necessary. Recovered first-message backgrounds are selected under the current scope for new comments; original Issues/comments are not rewritten. Do not clear event snapshots, thread mappings, or delivery ledgers to force a format change: they own idempotency and recovery.
+New mentions use the new rules. An event reuses its frozen envelope while its cache is valid: 24 hours by default, or seven days in Cloudflare durable mode, including legacy formats. After expiry, reconcile persisted delivery first; fetch context again only if preparation remains necessary. Recovered first-message backgrounds are selected under the current scope for new comments; original Issues/comments are not rewritten. Do not clear event snapshots, thread mappings, or delivery ledgers to force a format change: they own idempotency and recovery.
 
 Read back `schemaVersion`, `eventPayload.messageTs`, `context.sinceTs`, and `initialCutoffTs` separately, then check the complete thread interval and bounded side context. See [Multica Operations](MULTICA-OPERATIONS_EN.md) for read-only verification.
 

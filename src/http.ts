@@ -1,3 +1,4 @@
+import { DurableOutbox } from "./durable-outbox.js";
 import { routeTicket } from "./semantic-route.js";
 import { channelSenderAllowed, deliverReply, isOwnerSelfAssignment, workerReadToken, replyJob, scheduleReply } from "./worker-reply.js";
 import { Buffer } from 'node:buffer';
@@ -9,6 +10,7 @@ import {
   isCancelCommand,
   canCancelTask,
   isSupportedMessage,
+  allowedSourceApp,
   type SlackMessageEvent,
 } from "./mentions.js";
 import { readContext, enrichParticipantNames } from "./slack-context.js";
@@ -24,6 +26,41 @@ import { projectFiles, sourceMessageFingerprint } from "./context-envelope.js";
 
 export function json(value: unknown, status = 200): Response {
   return Response.json(value, { status });
+}
+
+// Deployment configuration can name missed messages. Always reread Slack and apply current grants.
+export async function recoverConfiguredMessages(env: NodeJS.ProcessEnv, send: typeof fetch = fetch): Promise<void> {
+  if (!env.RELAY_RECOVERY_MESSAGES?.trim()) return;
+  const config=loadRelayConfig(env);
+  const store=new UpstashThreadStore(config.kvRestApiUrl,config.kvRestApiToken,send);
+  const targets=env.RELAY_RECOVERY_MESSAGES.split(',').map(s=>s.trim());
+  if (targets.length>10) throw new Error('invalid_recovery_configuration');
+  for (const target of targets) {
+    const match=/^([CDG][A-Z0-9]+):(\d+\.\d{1,6})$/.exec(target);
+    if (!match) throw new Error('invalid_recovery_configuration');
+    const channelId=match[1]!, messageTs=match[2]!;
+    const marker='relay:recovered:'+digest(config.multicaWorkspaceId+':'+config.multicaProjectId+':'+config.multicaAgentId+':'+target);
+    if (await store.get(marker)) continue;
+    const token=channelId.startsWith('D')?config.slackContextToken:env.SLACK_CHANNEL_READ_TOKEN;
+    if (!token) throw new Error('recovery_read_unavailable');
+    const params=new URLSearchParams({channel:channelId,oldest:messageTs,latest:messageTs,inclusive:'true',limit:'1'});
+    const response=await send('https://slack.com/api/conversations.history?'+params,{headers:{authorization:'Bearer '+token},signal:AbortSignal.timeout(10000)});
+    const data=await response.json();
+    if (!response.ok || !data.ok || !Array.isArray(data.messages)) throw new Error('recovery_read_unavailable');
+    const source=data.messages.find((m:SlackMessageEvent)=>m.ts===messageTs);
+    if (!source || !isSupportedMessage({...source,type:'message',channel:channelId},config.allowedUserAppIds)) throw new Error('recovery_source_rejected');
+    const mention=findTargetMention(source.text,config.targetUserIds,config.targetSubteamIds);
+    if (!mention) throw new Error('recovery_source_rejected');
+    const event=parsedEvent({teamId:config.teamId,channelId,messageTs,threadTs:source.thread_ts??source.ts,
+      senderUserId:source.user,text:source.text,mention,sourceFingerprint:sourceMessageFingerprint(source),
+      ...(source.app_id?{sourceAppId:source.app_id}:{}),...(source.files?{files:projectFiles(source.files,Number.MAX_SAFE_INTEGER)}:{})});
+    if (!admitted(event,config,env.SLACK_CHANNEL_SENDER_GRANTS)) throw new Error('recovery_source_rejected');
+    event.operation=isCancelCommand(event.text,config.targetUserIds,config.targetSubteamIds,config.cancelKeywords)?'cancel':'dispatch';
+    if (event.operation==='cancel' && !canCancelTask(event.senderUserId,config.targetUserIds)) throw new Error('recovery_source_rejected');
+    await new DurableOutbox(config,send).schedule(event);
+    await store.set(marker,'queued',7*86400);
+    console.info('relay_recovery',{eventId:digest(messageKey(event)),action:'queued'});
+  }
 }
 async function readBody(request: Request): Promise<string> {
   if (!request.body) return "";
@@ -49,6 +86,7 @@ function record(value: unknown): value is Record<string, unknown> {
 function admitted(event: SlackThreadEvent, config: RelayConfig, senderGrants?: string): boolean {
   return (
     event.teamId === config.teamId &&
+    allowedSourceApp(event.sourceAppId, config.allowedUserAppIds) &&
     (config.allowAllChannels || config.allowedChannelIds.has(event.channelId) || isOwnerSelfAssignment(event, config)) &&
     !config.blockedChannelIds.has(event.channelId) &&
     channelSenderAllowed(event, config, senderGrants) &&
@@ -72,6 +110,8 @@ function parsedEvent(value: unknown): SlackThreadEvent {
         typeof value[k] !== "string" || !/^\d+\.\d{1,6}$/u.test(value[k] as string),
     ) ||
     typeof value.text !== "string" ||
+    (value.sourceAppId !== undefined &&
+      (typeof value.sourceAppId !== 'string' || !/^A[A-Z0-9]+$/u.test(value.sourceAppId))) ||
     (value.sourceFingerprint !== undefined &&
       (typeof value.sourceFingerprint !== "string" || !/^[a-f0-9]{64}$/u.test(value.sourceFingerprint))) ||
     (value.operation !== undefined &&
@@ -85,6 +125,8 @@ function parsedEvent(value: unknown): SlackThreadEvent {
   return value as unknown as SlackThreadEvent;
 }
 function reason(error: unknown): string {
+  if (error instanceof Error && /^outbox_store_http_\d{3}$/.test(error.message)) return error.message;
+  if (error instanceof TypeError && error.message.includes('Illegal invocation')) return 'invalid_fetch_receiver';
   if (
     error instanceof Error &&
     ["TimeoutError", "AbortError"].includes(error.name)
@@ -92,6 +134,8 @@ function reason(error: unknown): string {
     return "timeout";
   const codes = [
     "reply_queue_failed",
+    "outbox_store_failed",
+    "outbox_read_failed",
     "reply_read_failed",
     "slack_delivery_unknown",
     "body_too_large",
@@ -193,7 +237,7 @@ export async function acceptSlack(
   if (
     body.type !== "event_callback" ||
     !record(body.event) ||
-    !isSupportedMessage(body.event as SlackMessageEvent)
+    !isSupportedMessage(body.event as SlackMessageEvent, config.allowedUserAppIds)
   )
     return json({ action: "ignored" });
   const event = body.event;
@@ -212,6 +256,7 @@ export async function acceptSlack(
       threadTs: event.thread_ts ?? event.ts,
       senderUserId: event.user,
       text: event.text,
+      ...(event.app_id ? {sourceAppId:event.app_id} : {}),
       mention,
       sourceFingerprint: sourceMessageFingerprint(event),
       ...(event.files ? { files: projectFiles(event.files,Number.MAX_SAFE_INTEGER) } : {}),
@@ -235,6 +280,11 @@ export async function acceptSlack(
   )
     return json({ action: "ignored", reason: "cancel_not_allowed" });
   try {
+    if (config.durableScheduler) {
+      const id = await new DurableOutbox(config, fetchImpl).schedule(payload);
+      console.info("relay_admission", {eventId: digest(messageKey(payload)), queueMessageId: id, transport: "redis"});
+      return json({action: "accepted", queueMessageId: id});
+    }
     const response = await fetchImpl(
       config.queueUrl + "/v2/publish/" + config.consumerUrl,
       {
@@ -308,19 +358,35 @@ export async function consumeQueue(
   } catch {
     return json({ error: "invalid_queue_signature" }, 401);
   }
+  if (config.durableScheduler) {
+    let payload: unknown;
+    try { payload = JSON.parse(raw); } catch { return consumerFailure('invalid_event'); }
+    try {
+      await new DurableOutbox(config,fetchImpl).schedule(payload);
+      return json({action:'accepted',transport:'redis'});
+    } catch { return json({error:'queue_unavailable',retryable:true},503); }
+  }
+  return processRelayPayload(raw, env, fetchImpl);
+}
+
+// Only verified QStash deliveries and the private durable outbox call this processor.
+export async function processRelayPayload(raw: string, env: NodeJS.ProcessEnv, fetchImpl: typeof fetch = fetch): Promise<Response> {
+  let config: RelayConfig;
+  try { config = loadRelayConfig(env); } catch { return json({error:"relay_not_configured"},500); }
   let event: SlackThreadEvent;
   try {
     const payload = JSON.parse(raw);
     if (payload?.kind === 'thread_reply') {
       if (env.WORKER_THREAD_REPLIES !== 'true') return json({action:'ignored'});
       try {
-        const action = await deliverReply(payload, config, (input,init)=>fetchImpl(input,init), env.SLACK_CHANNEL_READ_TOKEN, env.SLACK_CHANNEL_SENDER_GRANTS, env.GITHUB_REVIEW_SIGNING_KEY, env.GITHUB_REVIEW_WORKSPACE_SLUG,
+        const timeout=AbortSignal.timeout(45000);
+        const action = await deliverReply(payload, config, (input,init={})=>fetchImpl(input,{...init,signal:init.signal?AbortSignal.any([init.signal,timeout]):timeout}), env.SLACK_CHANNEL_READ_TOKEN, env.SLACK_CHANNEL_SENDER_GRANTS, env.GITHUB_REVIEW_SIGNING_KEY, env.GITHUB_REVIEW_WORKSPACE_SLUG,
           {businessChannel:env.BUSINESS_CHANNEL,businessSenders:env.BUSINESS_SENDERS,businessTestDm:env.BUSINESS_TEST_DM,businessGrants:env.BUSINESS_CHANNEL_SENDER_GRANTS});
         console.info('relay_reply', {action, issueId:payload.issueId, attempt:payload.attempt});
         return json({action});
       } catch (error) {
         console.warn('relay_reply', {action:'retry', reason:reason(error)});
-        return json({error:'reply_unavailable'},503);
+        return json({error:'reply_unavailable', reason:reason(error)},503);
       }
     }
     event = parsedEvent(payload);

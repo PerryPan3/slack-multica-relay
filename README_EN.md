@@ -4,6 +4,9 @@
 
 A reliability-focused Slack → Multica bridge. It accepts signed Slack mentions, persists them through QStash, maps each Slack thread to a Multica Issue, and delivers later mentions as comments to the same Agent workflow.
 
+
+Cloudflare can use Redis admission and scheduled recovery to avoid consuming QStash messages while waiting for the local runtime. Operational failures stay out of channel replies. See [durable recovery and notifications](docs/CONFIGURATION_EN.md#cloudflare-durable-recovery-and-channel-notifications).
+
 ## Why this project exists
 
 A direct Slack-to-Agent integration easily conflates “Slack acknowledged the event,” “the task was persisted,” “the Agent completed,” and “the reply reached the user.” This project separates those stages and gives admission, retries, context, idempotency, and final delivery explicit owners:

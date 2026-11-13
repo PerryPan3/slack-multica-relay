@@ -27,6 +27,8 @@ B 为本次 mention；A 为同一 workspace/project/agent/thread 中，时间早
 
 `schemaVersion: 5` 每条普通消息独占一行；`origin=unknown`、空 `files` 和 currentRequest 的空正文在展示中省略。有附件、bot 来源或缺失标记时保留实际字段。时间戳、作者 ID、姓名映射、原文、回复父子关系和回复路由均保留，不把旁支回复摊平成主消息。
 
+用户通过受信任应用代发时，`eventPayload.sourceAppId` 保存 Slack 原始 `app_id`，并随队列、冻结快照和任务展示保留。普通用户消息不含该字段，兼容已有快照。这个字段用于准入和回帖来源复核，不能由正文推断。
+
 ```json
 {
   "schemaVersion": 5,
@@ -85,7 +87,7 @@ A 在本次 Slack 结果中缺失时，使用已持久化 eventPayload 的正文
 
 `schemaVersion: 5` 是任务正文版本，`:sent-context-index` v3 是 Relay 内部缓存版本，两者独立。部署新版 Relay 即可启用，无需新增变量、修改 Agent Instructions 或重新绑定最终回复 Skill。
 
-新 mention 使用新规则；同一事件的冻结 envelope 在 24 小时缓存有效期内复用，即使它是旧格式。缓存过期后先核对持久化记录，确需重新准备时才读取上下文。旧版首次背景在恢复后按当前范围重新选取，再写入新的 comment，原 Issue/comment 不回写。不要为强制切换格式清理事件快照、线程映射或 delivery ledger；这些记录承担幂等与恢复职责。
+新 mention 使用新规则；同一事件的冻结 envelope 在缓存有效期内复用，默认 24 小时，Cloudflare 持久模式为 7 天，即使它是旧格式。缓存过期后先核对持久化记录，确需重新准备时才读取上下文。旧版首次背景在恢复后按当前范围重新选取，再写入新的 comment，原 Issue/comment 不回写。不要为强制切换格式清理事件快照、线程映射或 delivery ledger；这些记录承担幂等与恢复职责。
 
 核验时分别比较任务正文中的 `schemaVersion`、`eventPayload.messageTs`、`context.sinceTs` 和 `initialCutoffTs`，再检查同线程区间及旁支范围。具体只读步骤见 [Multica 操作说明](MULTICA-OPERATIONS.md)。
 
