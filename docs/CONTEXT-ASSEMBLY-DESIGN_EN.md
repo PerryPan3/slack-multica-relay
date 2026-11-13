@@ -87,7 +87,7 @@ If A is missing from the current Slack result, restore its text, author, and att
 
 `schemaVersion: 5` versions task bodies, while v3 `:sent-context-index` versions the internal Relay cache. Deploying the new Relay enables the policy without adding environment variables, changing Agent Instructions, or rebinding the final-reply Skill.
 
-New mentions use the new rules. An event reuses its frozen envelope while the 24-hour cache is valid, including legacy formats. After expiry, reconcile persisted delivery first; fetch context again only if preparation remains necessary. Recovered first-message backgrounds are selected under the current scope for new comments; original Issues/comments are not rewritten. Do not clear event snapshots, thread mappings, or delivery ledgers to force a format change: they own idempotency and recovery.
+New mentions use the new rules. An event reuses its frozen envelope while its cache is valid: 24 hours by default, or seven days in Cloudflare durable mode, including legacy formats. After expiry, reconcile persisted delivery first; fetch context again only if preparation remains necessary. Recovered first-message backgrounds are selected under the current scope for new comments; original Issues/comments are not rewritten. Do not clear event snapshots, thread mappings, or delivery ledgers to force a format change: they own idempotency and recovery.
 
 Read back `schemaVersion`, `eventPayload.messageTs`, `context.sinceTs`, and `initialCutoffTs` separately, then check the complete thread interval and bounded side context. See [Multica Operations](MULTICA-OPERATIONS_EN.md) for read-only verification.
 

@@ -87,7 +87,7 @@ A 在本次 Slack 结果中缺失时，使用已持久化 eventPayload 的正文
 
 `schemaVersion: 5` 是任务正文版本，`:sent-context-index` v3 是 Relay 内部缓存版本，两者独立。部署新版 Relay 即可启用，无需新增变量、修改 Agent Instructions 或重新绑定最终回复 Skill。
 
-新 mention 使用新规则；同一事件的冻结 envelope 在 24 小时缓存有效期内复用，即使它是旧格式。缓存过期后先核对持久化记录，确需重新准备时才读取上下文。旧版首次背景在恢复后按当前范围重新选取，再写入新的 comment，原 Issue/comment 不回写。不要为强制切换格式清理事件快照、线程映射或 delivery ledger；这些记录承担幂等与恢复职责。
+新 mention 使用新规则；同一事件的冻结 envelope 在缓存有效期内复用，默认 24 小时，Cloudflare 持久模式为 7 天，即使它是旧格式。缓存过期后先核对持久化记录，确需重新准备时才读取上下文。旧版首次背景在恢复后按当前范围重新选取，再写入新的 comment，原 Issue/comment 不回写。不要为强制切换格式清理事件快照、线程映射或 delivery ledger；这些记录承担幂等与恢复职责。
 
 核验时分别比较任务正文中的 `schemaVersion`、`eventPayload.messageTs`、`context.sinceTs` 和 `initialCutoffTs`，再检查同线程区间及旁支范围。具体只读步骤见 [Multica 操作说明](MULTICA-OPERATIONS.md)。
 
