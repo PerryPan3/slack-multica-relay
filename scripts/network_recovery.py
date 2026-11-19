@@ -3,6 +3,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 from pathlib import Path
 import subprocess
 import time
@@ -93,13 +94,20 @@ class ProgressWatch:
         self.progress = time.monotonic() if now is None else now
         self.probed = self.progress
         self.tools = set()
+        self.network_since = None
 
     def event(self, event, now):
+        item=event.get('item',{})
+        if event.get('type')=='error' or item.get('type')=='error':
+            message=str(event.get('message') or item.get('message') or '')
+            if re.search(r'(?i)waiting for network|connection (?:failed|reset|closed)|error sending request|stream disconnected',message):
+                if self.network_since is None: self.network_since=now
+            return
         # Reconnection/error messages are not model or tool progress.
         if event.get("type") not in ("item.started", "item.completed", "turn.completed"):
             return
         self.progress = now
-        item = event.get("item", {})
+        self.network_since = None
         if item.get("type") == "mcp_tool_call":
             if event["type"] == "item.started": self.tools.add(item.get("id"))
             else: self.tools.discard(item.get("id"))
@@ -110,6 +118,8 @@ class ProgressWatch:
         if self.tools:
             if idle >= 300: raise NetworkWait("model_stalled_wait")
             return
+        if self.network_since is not None and now-self.network_since>=30:
+            raise NetworkWait()
         if idle >= 60 and now - self.probed >= 30:
             self.probed = now
             if not probe(): raise NetworkWait()

@@ -32,6 +32,14 @@ class NetworkRecoveryTests(unittest.TestCase):
         with self.assertRaises(recovery.NetworkWait) as caught:watch.check(301,lambda:True)
         self.assertEqual(caught.exception.code,'model_stalled_wait')
 
+    def test_actual_response_connection_errors_override_healthy_head_probe(self):
+        watch=recovery.ProgressWatch(0)
+        watch.event({'type':'error','message':'Reconnecting... waiting for network (Connection failed: error sending request)'},1)
+        watch.event({'type':'error','message':'Reconnecting... waiting for network'},20)
+        with self.assertRaises(recovery.NetworkWait):watch.check(31,lambda:True)
+        watch.event({'type':'item.completed','item':{'type':'agent_message'}},32)
+        watch.check(33,lambda:True)
+
     def test_real_progress_allows_long_review_without_fixed_five_minute_limit(self):
         watch=recovery.ProgressWatch(0)
         for now in range(20,1800,20):
