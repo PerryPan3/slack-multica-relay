@@ -7,6 +7,8 @@ const reasons: Record<string,string> = {
   model_capacity: '模型服务持续返回容量或节流错误，有限自动恢复已用完。',
   model_rate_limit: '模型服务持续限流，内置重试后仍未恢复。',
   model_turn_failed: '模型调用失败，需要检查私有运行诊断。',
+  model_recovery_exhausted: '连接恢复后连续三次执行仍无法推进，已停止自动恢复；会话与审批记录已保留。',
+  recovery_dispatch_unknown: '续接请求的提交结果无法确认，已停止重复提交；需要核对 Multica 执行记录。',
   execution_failed: '执行中断，需要检查私有运行诊断和已有结果。',
 };
 

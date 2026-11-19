@@ -397,3 +397,16 @@ it('delivers the unique recovered result after a signed internal failure, withou
   expect(await deliverReply(ambiguous.job,config,ambiguous.send,undefined,undefined,'key')).toBe('ambiguous_run');
   expect(ambiguous.state.posts).toBe(0);
 });
+
+it('keeps a signed disconnected task quiet and delivers the recovered result once',async()=>{
+  const f=fixture(event,'user-test','intent1.fixture');
+  const body=Buffer.from(JSON.stringify({text:'saved',seconds:61,tools:[],reviews:[],internalFailure:true,failureCode:'model_network_wait'})).toString('base64url');
+  const paused='relay-agent/1 '+body+'.'+createHmac('sha256','key').update('agent-result/1:intent1.fixture:'+body).digest('hex');
+  f.state.output=paused;
+  expect(await deliverReply(f.job,config,f.send,undefined,undefined,'key')).toBe('waiting');
+  expect(f.state.posts).toBe(0);
+  f.state.previousOutputs=[paused];f.state.output='已核查并完成。';
+  expect(await deliverReply(f.job,config,f.send,undefined,undefined,'key')).toBe('sent');
+  expect(await deliverReply(f.job,config,f.send,undefined,undefined,'key')).toBe('already_sent');
+  expect(f.state.posts).toBe(1);
+});

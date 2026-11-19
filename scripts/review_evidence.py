@@ -211,25 +211,28 @@ def prompt(packet, ops, history):
 def isolated_turn(prompt_text, policy):
     # Preserve the Slack model's deny-all hook. Only the host can dispatch evidence calls.
     import tempfile
+    import network_recovery
+
+    if network_recovery.enabled() and not network_recovery.reachable():
+        raise network_recovery.NetworkWait()
 
     with tempfile.TemporaryDirectory(prefix="perry-evidence-") as cwd:
-        result = subprocess.run(
-            [
-                str(PRIVATE / "bin/codex"),
-                "exec",
-                "--ephemeral",
-                "--skip-git-repo-check",
-                "--color",
-                "never",
-                "-",
-            ],
-            input=prompt_text,
-            capture_output=True,
-            encoding="utf-8",
-            cwd=cwd,
-            env={"CODEX_HOME": str(PRIVATE / "model-home")},
-            timeout=180,
-        )
+        import signal
+        process=subprocess.Popen(
+            [str(PRIVATE / "bin/codex"), "exec", "--ephemeral", "--skip-git-repo-check", "--color", "never", "-"],
+            stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,cwd=cwd,
+            env={"CODEX_HOME":str(PRIVATE / "model-home")},start_new_session=True)
+        try:
+            stdout,stderr=process.communicate(prompt_text,timeout=90 if network_recovery.enabled() else 180)
+            result=subprocess.CompletedProcess(process.args,process.returncode,stdout,stderr)
+        except subprocess.TimeoutExpired:
+            if network_recovery.enabled():
+                raise network_recovery.NetworkWait('model_stalled_wait') from None
+            raise
+        finally:
+            try: os.killpg(process.pid,signal.SIGKILL)
+            except ProcessLookupError: pass
+            process.communicate()
     if result.returncode:
         raise Unavailable("隔离的审查进程未完成")
     return result.stdout

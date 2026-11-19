@@ -96,6 +96,16 @@ The old `SLACK_REACTION_TOKEN` and `SLACK_REACTION_READ_TOKEN` are no longer rea
 
 ## Multica Agent Runtime
 
+### Model connection recovery
+
+For a local ChatGPT-authenticated runtime, private `agent/recovery.json` enables recovery with `enabled: true`, `worker_url`, the `multica` executable, `profile`, `server_url`, and `workspace_id`. Credentials remain in the existing profile and private signing key. Run `scripts/network_recovery.py` once a minute using the host service manager. Deploy the Worker's `/api/runtime/recovery` endpoint before enabling the local configuration.
+
+Execution checks connectivity before inference. After 60 seconds without progress, a failed lightweight connectivity check parks the request and releases its Multica slot. A reachable but silent model is bounded to five minutes; in-flight tools also have five minutes to settle. Preparation inference is capped at 90 seconds. Private `runs/network-wait/` records preserve the frozen request and session without repeatedly calling the model or posting operational errors in channels.
+
+Two successful connectivity checks at least 30 seconds apart allow a signed readiness query. The Worker revalidates the original event, current permissions, cancellation, thread, and signed paused result, returning only the matching run. Active runs prevent duplicate dispatch. The watcher persists dispatch intent before rerunning; an unknown submission is not repeated and triggers an owner-only notification after five minutes. Resumption keeps the session and reconciles prior writes through existing receipts.
+
+Offline probes consume no recovery attempts. Three unsuccessful resumed executions stop automatic recovery and notify the owner privately. Existing seven-day event validity and reply waiting limits remain; cancelled or delivered requests are not revived. Connectivity and scheduling checks do not establish completion of a PR review or GitHub approval.
+
 The Relay does not read the variables below. Configure them only on the Runtime or Agent when Agent Instructions or the local Slack Skill require them.
 
 | Variable | Purpose |

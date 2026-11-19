@@ -188,11 +188,18 @@ export async function deliverReply(
       (r.trigger_comment_id || undefined) === trigger,
   );
   const terminal = runs.filter((r) => r.status === "completed");
-  const recovered = terminal.filter(r => typeof r.result?.output !== 'string' ||
-    !reviewPresentation(r.result.output,frozen.context?.githubReviewTicket,reviewKey)?.internalFailure);
+  const paused = (r: typeof runs[number]) => typeof r.result?.output === 'string' &&
+    ['model_network_wait','model_stalled_wait'].includes(reviewPresentation(r.result.output,frozen.context?.githubReviewTicket,reviewKey)?.failureCode || '');
+  const recovered = terminal.filter(r => !paused(r) && (typeof r.result?.output !== 'string' ||
+    !reviewPresentation(r.result.output,frozen.context?.githubReviewTicket,reviewKey)?.internalFailure));
+  if (!recovered.length && terminal.length && paused(terminal[0]) && job.attempt < maxAttempts && runs[0]?.status!=='cancelled') {
+    await scheduleReply({...job,attempt:job.attempt+1},config,send);
+    return 'waiting';
+  }
   // A signed no-result failure is not a competing business answer after recovery.
   const recovering = !recovered.length && runs.some(r => !["completed","failed","cancelled"].includes(r.status));
-  const completed = recovering ? [] : recovered.length === 1 ? recovered : terminal;
+  const nonPaused=terminal.filter(r=>!paused(r));
+  const completed = recovering ? [] : recovered.length ? recovered : nonPaused.length ? nonPaused.slice(0,1) : terminal;
   let output: unknown;
   if (!completed.length) {
     if (job.attempt < maxAttempts && !(runs.length && runs.every(r=>r.status==="failed" || r.status==="cancelled"))) {

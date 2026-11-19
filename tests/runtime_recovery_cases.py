@@ -17,6 +17,56 @@ import agent_runtime as runtime
 
 
 class ProcessRecoveryTests(unittest.TestCase):
+    def test_stop_signal_is_not_swallowed_by_review_preparation(self):
+        operations=SimpleNamespace(prepare_reviews=Mock(side_effect=runtime.RuntimeInterrupted(15)))
+        with self.assertRaises(runtime.RuntimeInterrupted):runtime.prepare_assignments(operations)
+
+    def test_disconnected_process_exits_and_saves_its_session(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder)
+            command=[sys.executable,'-c',"import json,time;print(json.dumps({'type':'thread.started','thread_id':'preserved'}),flush=True);time.sleep(30)",'-o',str(root/'final')]
+            watch=Mock()
+            def check(now):
+                if time.monotonic()-started>.15:raise runtime.network_recovery.NetworkWait()
+            watch.check.side_effect=check
+            with patch.object(runtime.network_recovery,'enabled',return_value=True),patch.object(runtime.network_recovery,'ProgressWatch',return_value=watch):
+                started=time.monotonic()
+                with (root/'events').open('w') as out,(root/'errors').open('w') as err:
+                    with self.assertRaises(runtime.network_recovery.NetworkWait):
+                        runtime.run_model(command,input='',text=True,stdout=out,stderr=err,cwd=root,env={},timeout=30)
+                self.assertLess(time.monotonic()-started,2)
+            runtime.persist_session(root/'events',root/'session')
+            self.assertEqual((root/'session').read_text(),'preserved')
+
+    def test_offline_turn_does_not_start_model_and_ready_rerun_reuses_ticket(self):
+        from contextlib import contextmanager
+        @contextmanager
+        def gateway(*args):yield 1234,'nonce'
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder);(root/'review').mkdir();(root/'review/key').write_text('test-key')
+            claim={'binding':['T','D','1'],'history':[],'partial':False,'targets':[],'local':False}
+            operations=SimpleNamespace(counts={},receipts=[],services=lambda:[],prepare_reviews=Mock(return_value={}))
+            def home(directory,*args):
+                path=directory/'home';path.mkdir(exist_ok=True);return path
+            def model(command,**kwargs):
+                Path(command[command.index('-o')+1]).write_text('Recovered result')
+                return SimpleNamespace(returncode=0)
+            with patch.object(runtime.review_evidence,'PRIVATE',root),patch.object(runtime,'ROOT',root/'runs/native-agent'), \
+                 patch.object(runtime.slack_intent,'verified',return_value=claim),patch.object(runtime,'AgentTools',return_value=operations) as make, \
+                 patch.object(runtime,'running_gateway',gateway),patch.object(runtime,'prepare_home',home), \
+                 patch.object(runtime,'run_model',side_effect=model) as run,patch.object(runtime.network_recovery,'enabled',return_value=True), \
+                 patch.object(runtime.network_recovery,'reachable',return_value=False) as connected:
+                args={'ticket':'offline','event':{'text':'Read only'}}
+                saved=runtime.execute(args);make.assert_not_called();run.assert_not_called()
+                self.assertEqual(saved,runtime.execute(args));run.assert_not_called()
+                identity=runtime.hashlib.sha256(b'offline').hexdigest()
+                pending=runtime.network_recovery.read(identity);pending['ready']=True;runtime.network_recovery.save(identity,pending)
+                connected.return_value=True
+                result=runtime.execute(args)
+                self.assertNotEqual(result,saved);run.assert_called_once();operations.prepare_reviews.assert_called_once()
+                self.assertIsNone(runtime.network_recovery.read(identity))
+                self.assertEqual(result,runtime.execute(args));run.assert_called_once()
+
     def test_failed_turn_preserves_capacity_error_instead_of_exit_code(self):
         with tempfile.TemporaryDirectory() as folder:
             root=Path(folder)

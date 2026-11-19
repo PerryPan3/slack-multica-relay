@@ -1,4 +1,5 @@
 import { DurableOutbox } from "./durable-outbox.js";
+import { networkRecovery } from "./network-recovery.js";
 import { loadRelayConfig } from "./config.js";
 import { runtimeOnline } from "./multica-api.js";
 import { acceptSlack, consumeQueue, json, processRelayPayload, recoverConfiguredMessages } from './http.js';
@@ -33,6 +34,10 @@ export default {
 
   async fetch(request: Request, env: Record<string, string | undefined>): Promise<Response> {
     const path = new URL(request.url).pathname;
+    if (path === '/api/runtime/recovery') {
+      try { return await networkRecovery(request,env); }
+      catch { return json({action:'waiting'},503); }
+    }
     if (path === '/api/slack/events') return acceptSlack(request, env);
     if (path === '/api/queue/consume') return consumeQueue(request, env);
     if (path === '/api/health') {
