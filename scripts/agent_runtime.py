@@ -27,6 +27,7 @@ from mcp.types import CallToolResult, ImageContent, TextContent, ToolAnnotations
 from agent_tools import AgentTools
 import review_evidence
 import slack_intent
+import network_recovery
 from agent_profile import load_profile, profile_prompt, ProfileError
 
 ROOT=review_evidence.PRIVATE/"runs"/"native-agent"
@@ -62,6 +63,8 @@ def tool_policy(owner):
 def prepare_assignments(operations):
     try:
         return operations.prepare_reviews()
+    except network_recovery.NetworkWait:
+        raise
     except Exception as error:
         operations.review_plan={}
         return {"continue_to_verdict":[],"preparation_error":type(error).__name__+": "+str(error)[:1000]}
@@ -80,7 +83,7 @@ def execution_failure(error):
     return "执行未完成（"+type(error).__name__+"），需核对私有运行日志"
 
 
-class RuntimeInterrupted(Exception):
+class RuntimeInterrupted(BaseException):
     def __init__(self,signum):
         self.signum=signum
         super().__init__("Runtime received signal "+str(signum))
@@ -92,6 +95,7 @@ class ModelFailure(Exception):
         # CLI 0.155 maps both server_is_overloaded and slow_down to this message.
         self.retryable=message=='Selected model is at capacity. Please try a different model.'
         self.code='model_capacity' if self.retryable else 'model_turn_failed'
+        self.network_failure=bool(re.search(r'(?i)stream disconnected|connection (?:reset|failed|closed)|error sending request|timed? out|network is unreachable|failed to connect',message))
         self.public_reason=('模型服务返回容量或节流错误，自动恢复仍未完成' if self.retryable
                             else '模型调用失败，具体诊断已保存在私有运行记录')
         if message.startswith('exceeded retry limit, last status: 429'):
@@ -148,6 +152,7 @@ def run_model(command,*,input,text,stdout,stderr,cwd,env,timeout):
         raise
     completed_at=None
     failure=None
+    watch=network_recovery.ProgressWatch() if network_recovery.enabled() else None
     try:
         with Path(stdout.name).open() as events:
             while True:
@@ -157,18 +162,22 @@ def run_model(command,*,input,text,stdout,stderr,cwd,env,timeout):
                     if not line.endswith('\n'):
                         events.seek(position);break
                     # Terminal events are small; large tool results do not need parsing here.
-                    if len(line)>65536: continue
+                    if len(line)>65536 and watch is None: continue
                     try: event=json.loads(line)
                     except ValueError: continue
+                    if watch: watch.event(event,time.monotonic())
                     if event.get('type')=='turn.completed': completed_at=time.monotonic()
                     if event.get('type')=='turn.failed': failure=ModelFailure(event.get('error',{}))
                 code=process.poll()
+                if network_recovery.requested_pause:
+                    raise network_recovery.NetworkWait(network_recovery.requested_pause)
                 if failure is not None: raise failure
                 if completed_at is not None and final.exists() and final.stat().st_size>0 and (code is not None or time.monotonic()-completed_at>=1):
                     return SimpleNamespace(returncode=0)
                 if code is not None:
                     if code==0: raise RuntimeError("Model process exited without a completed turn and final response.")
                     return SimpleNamespace(returncode=code)
+                if watch: watch.check(time.monotonic())
                 # Wall time includes sleep on systems whose monotonic clock pauses while asleep.
                 if max(time.time()-started,time.monotonic()-monotonic)>=timeout:
                     raise subprocess.TimeoutExpired(command[0],timeout)
@@ -187,7 +196,8 @@ def recover_model(command,*,payload,directory,identity,session_file,outcome,outc
         current=[command[0],'exec']
         if session_file.exists():current+=['resume',session_file.read_text().strip()]
         current+=command[command.index('--skip-git-repo-check'):]
-        suffix='' if attempt==0 else '.attempt-'+str(attempt+1)
+        resumes=(network_recovery.read(identity) or {}).get('resumes',0)
+        suffix=('.resume-'+str(resumes) if resumes else '')+('' if attempt==0 else '.attempt-'+str(attempt+1))
         events=directory/(identity+suffix+'.events.jsonl')
         text=payload if retry_context is None else payload+'\n恢复上下文：'+json.dumps(retry_context,ensure_ascii=False)
         outcome.update(phase='model',attempts=attempt+1)
@@ -199,6 +209,8 @@ def recover_model(command,*,payload,directory,identity,session_file,outcome,outc
             if run.returncode:raise subprocess.CalledProcessError(run.returncode,current[0])
             return
         except ModelFailure as error:
+            if network_recovery.enabled() and error.code=='model_turn_failed' and error.network_failure:
+                raise network_recovery.NetworkWait() from error
             if not error.retryable or attempt==2:raise
             delay=(15,45)[attempt]
             outcome.setdefault('retries',[]).append({'error_code':error.code,'delay_seconds':delay})
@@ -226,7 +238,7 @@ def tool_failure(error):
                      'RemoteProtocolError','ProtocolError'}
     def transient(item):
         status=getattr(getattr(item,'response',None),'status_code',None)
-        return (isinstance(item,(TimeoutError,ConnectionError)) or type(item).__name__ in transient_names or
+        return (isinstance(item,(TimeoutError,ConnectionError,subprocess.TimeoutExpired)) or type(item).__name__ in transient_names or
                 status in (429,502,503,504) or
                 (type(item).__name__ in ('MCPError','McpError') and 'connection closed' in str(item).lower()))
     retryable=bool(leaves) and all(transient(item) for item in leaves)
@@ -281,6 +293,8 @@ def build_server(operations,audit_path):
                     else: result=await asyncio.to_thread(func,*args)
                     break
                 except Exception as error:
+                    if isinstance(error,network_recovery.NetworkWait):
+                        network_recovery.requested_pause=error.code
                     result=tool_failure(error)
                     if not retry_read or attempt or not result['retryable']: return result
                     await asyncio.sleep(.25)
@@ -470,6 +484,7 @@ def prepare_home(directory,claim,port,nonce,operations):
 
 
 def execute(args):
+    network_recovery.requested_pause=None
     key=(review_evidence.PRIVATE/"review/key").read_text().strip().encode()
     claim=slack_intent.verified(args,key)
     event=args["event"]
@@ -492,7 +507,8 @@ def execute(args):
         saved=db.execute("select reply from replies where id=?",(identity,)).fetchone()
         outcome_file=directory/"last-execution.json"
         previous=prior_execution(outcome_file)
-        if saved and not changed_unsupported_model(saved[0],previous,identity,key,args['ticket']):
+        pending=network_recovery.read(identity)
+        if saved and not (pending and pending.get('ready')) and not changed_unsupported_model(saved[0],previous,identity,key,args['ticket']):
             return {"reply":saved[0]}
         outcome={"request":identity,"status":"running","phase":"preparing","started":started}
         save_execution(outcome_file,outcome)
@@ -501,6 +517,10 @@ def execute(args):
         operations=SimpleNamespace(counts={},receipts=[])
         with interruption_handlers():
             try:
+                if network_recovery.enabled():
+                    # No inference starts while disconnected, including intent preparation.
+                    if not network_recovery.reachable(): raise network_recovery.NetworkWait()
+                    network_recovery.consume(identity)
                 profile=load_profile(review_evidence.PRIVATE)
                 outcome['profile_sha256']=profile['sha256']
                 operations=AgentTools(args,key,directory)
@@ -524,10 +544,18 @@ def execute(args):
                     result=final_file.read_text().strip()
                     if not result: raise RuntimeError("Native Agent returned an empty answer.")
                     outcome.update(status="completed",phase="finished")
-            except Exception as error:
+                network_recovery.clear(identity)
+            except network_recovery.NetworkWait as error:
+                deferred=network_recovery.defer(identity,args,error.code)
+                outcome.update(status="waiting_network" if deferred else "interrupted",
+                               reason=error.code,error_code=error.code if deferred else "model_recovery_exhausted")
+                if not deferred: network_recovery.clear(identity)
+                result="连接暂不可用，进度已保存，等待自动恢复。" if deferred else "模型连接多次恢复后仍无进展，需要检查专用模型连接。"
+            except (Exception,RuntimeInterrupted) as error:
                 outcome.update(status="interrupted",reason=execution_failure(error),
                                error_type=type(error).__name__,diagnostic=tool_failure(error)['error'])
                 if isinstance(error,ModelFailure):outcome['error_code']=error.code
+                network_recovery.clear(identity)
                 result="这次没能完成："+outcome["reason"]+"。"+("已经提交的审批见下方链接，其余部分还没有完成。" if operations.receipts else "已有进度已保留。你可以在这个线程继续追问，我会先核对之前的结果再接着处理。")
             finally:
                 outcome["finished"]=int(time.time())
