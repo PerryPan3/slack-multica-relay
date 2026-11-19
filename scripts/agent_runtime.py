@@ -209,7 +209,7 @@ def recover_model(command,*,payload,directory,identity,session_file,outcome,outc
             if run.returncode:raise subprocess.CalledProcessError(run.returncode,current[0])
             return
         except ModelFailure as error:
-            if network_recovery.enabled() and error.code=='model_turn_failed' and (error.network_failure or not network_recovery.reachable()):
+            if network_recovery.enabled() and error.code=='model_turn_failed' and error.network_failure:
                 raise network_recovery.NetworkWait() from error
             if not error.retryable or attempt==2:raise
             delay=(15,45)[attempt]

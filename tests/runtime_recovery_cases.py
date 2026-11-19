@@ -156,7 +156,9 @@ class ProcessRecoveryTests(unittest.TestCase):
                 operations=SimpleNamespace(receipts=[],reconcile_reviews=Mock(return_value={}))
                 command=['codex','exec','--skip-git-repo-check','--json','-o',str(root/'final'),'-']
                 with patch.object(runtime,'run_model',side_effect=runtime.ModelFailure({'message':message})) as run, \
-                     patch.object(runtime.time,'sleep') as sleep:
+                     patch.object(runtime.time,'sleep') as sleep, \
+                     patch.object(runtime.network_recovery,'enabled',return_value=True), \
+                     patch.object(runtime.network_recovery,'reachable',return_value=False):
                     with self.assertRaises(runtime.ModelFailure):
                         runtime.recover_model(command,payload='test',directory=root,identity='request',session_file=root/'session',
                             outcome=outcome,outcome_file=root/'outcome',operations=operations,home=root)
