@@ -187,7 +187,11 @@ export async function deliverReply(
       r.agent_id === config.multicaAgentId &&
       (r.trigger_comment_id || undefined) === trigger,
   );
-  const completed = runs.filter((r) => r.status === "completed");
+  const terminal = runs.filter((r) => r.status === "completed");
+  const recovered = terminal.filter(r => typeof r.result?.output !== 'string' ||
+    !reviewPresentation(r.result.output,frozen.context?.githubReviewTicket,reviewKey)?.internalFailure);
+  // A signed no-result failure is not a competing business answer after recovery.
+  const completed = recovered.length === 1 ? recovered : terminal;
   let output: unknown;
   if (!completed.length) {
     if (job.attempt < maxAttempts && !(runs.length && runs.every(r=>r.status==="failed" || r.status==="cancelled"))) {

@@ -64,6 +64,7 @@ function fixture(source: SlackThreadEvent = event, readIdentity = source.channel
     sourceAppId: event.sourceAppId,
     sourceBotId: undefined as string | undefined,
     runStatus: "completed",
+    previousOutputs: [] as string[],
     loseResponse: false,
     queued: 0,
     output: "test reply",
@@ -83,6 +84,7 @@ function fixture(source: SlackThreadEvent = event, readIdentity = source.channel
     }
     if (endpoint.endsWith("/task-runs"))
       return Response.json([
+        ...state.previousOutputs.map(output=>({id:"previous",workspace_id:"workspace",issue_id:issueId,agent_id:"agent",status:"completed",result:{output}})),
         {
           id: "run",
           workspace_id: "workspace",
@@ -381,4 +383,14 @@ it('routes an authenticated failed run to the owner DM, never to its source grou
   const settings={...config,allowedChannelIds:new Set(['D1','C1'])};
   for(let i=0;i<2;i++)expect(await deliverReply(f.job,settings,send,'bot-test',undefined,'key',undefined,{},'DOWNER')).toBe('failure_owner_notified');
   expect(posts).toHaveLength(1);expect(f.state.posts).toBe(0);
+});
+
+it('delivers the unique recovered result after a signed internal failure, without accepting two successful runs',async()=>{
+  const f=fixture();
+  const body=Buffer.from(JSON.stringify({text:'failed',seconds:0,tools:[],reviews:[],internalFailure:true})).toString('base64url');
+  f.state.previousOutputs=['relay-agent/1 '+body+'.'+createHmac('sha256','key').update('agent-result/1:ticket:'+body).digest('hex')];
+  expect(await deliverReply(f.job,config,f.send,undefined,undefined,'key')).toBe('sent');
+  const ambiguous=fixture();ambiguous.state.previousOutputs=['another successful result'];
+  expect(await deliverReply(ambiguous.job,config,ambiguous.send,undefined,undefined,'key')).toBe('ambiguous_run');
+  expect(ambiguous.state.posts).toBe(0);
 });
