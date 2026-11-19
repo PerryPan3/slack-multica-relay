@@ -389,6 +389,10 @@ it('delivers the unique recovered result after a signed internal failure, withou
   const f=fixture();
   const body=Buffer.from(JSON.stringify({text:'failed',seconds:0,tools:[],reviews:[],internalFailure:true})).toString('base64url');
   f.state.previousOutputs=['relay-agent/1 '+body+'.'+createHmac('sha256','key').update('agent-result/1:ticket:'+body).digest('hex')];
+  f.state.runStatus='running';
+  expect(await deliverReply(f.job,config,f.send,undefined,undefined,'key')).toBe('waiting');
+  expect(f.state.posts).toBe(0);
+  f.state.runStatus='completed';
   expect(await deliverReply(f.job,config,f.send,undefined,undefined,'key')).toBe('sent');
   const ambiguous=fixture();ambiguous.state.previousOutputs=['another successful result'];
   expect(await deliverReply(ambiguous.job,config,ambiguous.send,undefined,undefined,'key')).toBe('ambiguous_run');

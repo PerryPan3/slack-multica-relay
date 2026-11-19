@@ -191,7 +191,8 @@ export async function deliverReply(
   const recovered = terminal.filter(r => typeof r.result?.output !== 'string' ||
     !reviewPresentation(r.result.output,frozen.context?.githubReviewTicket,reviewKey)?.internalFailure);
   // A signed no-result failure is not a competing business answer after recovery.
-  const completed = recovered.length === 1 ? recovered : terminal;
+  const recovering = !recovered.length && runs.some(r => !["completed","failed","cancelled"].includes(r.status));
+  const completed = recovering ? [] : recovered.length === 1 ? recovered : terminal;
   let output: unknown;
   if (!completed.length) {
     if (job.attempt < maxAttempts && !(runs.length && runs.every(r=>r.status==="failed" || r.status==="cancelled"))) {
