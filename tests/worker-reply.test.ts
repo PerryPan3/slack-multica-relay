@@ -64,6 +64,7 @@ function fixture(source: SlackThreadEvent = event, readIdentity = source.channel
     sourceAppId: event.sourceAppId,
     sourceBotId: undefined as string | undefined,
     runStatus: "completed",
+    previousOutputs: [] as string[],
     loseResponse: false,
     queued: 0,
     output: "test reply",
@@ -83,6 +84,7 @@ function fixture(source: SlackThreadEvent = event, readIdentity = source.channel
     }
     if (endpoint.endsWith("/task-runs"))
       return Response.json([
+        ...state.previousOutputs.map(output=>({id:"previous",workspace_id:"workspace",issue_id:issueId,agent_id:"agent",status:"completed",result:{output}})),
         {
           id: "run",
           workspace_id: "workspace",
@@ -357,4 +359,41 @@ it("suppresses signed internal failures in channels but keeps private diagnostic
   expect(await deliverReply(dm.job,config,dm.send,undefined,undefined,'key')).toBe('sent');
   const normal=fixture(group);normal.state.output='需要确认业务所说的活跃用户是否包含试用账号。';
   expect(await deliverReply(normal.job,settings,normal.send,'bot-test')).toBe('sent');
+});
+
+it('routes an authenticated failed run to the owner DM, never to its source group',async()=>{
+  const group={...event,channelId:'C1'};
+  const f=fixture(group);
+  const packet={text:'internal diagnostic',seconds:0,tools:[],reviews:[],internalFailure:true,failureCode:'model_not_found'};
+  const body=Buffer.from(JSON.stringify(packet)).toString('base64url');
+  f.state.output='relay-agent/1 '+body+'.'+createHmac('sha256','key').update('agent-result/1:ticket:'+body).digest('hex');
+  const posts:any[]=[];
+  const send:typeof fetch=async(url,init)=>{
+    const path=String(url);
+    if(path.includes('/auth.test'))return Response.json({ok:true,user_id:'U1',team_id:'T1'});
+    if(path.includes('/conversations.history'))return Response.json({ok:true,messages:posts});
+    if(path.endsWith('/chat.postMessage')) {
+      const message=JSON.parse(String(init?.body));expect(message.channel).toBe('DOWNER');
+      posts.push({...message,user:'U1',ts:'20.001'});
+      return Response.json({ok:true,channel:'DOWNER',ts:'20.001'});
+    }
+    return f.send(url,init);
+  };
+  const settings={...config,allowedChannelIds:new Set(['D1','C1','DOWNER'])};
+  for(let i=0;i<2;i++)expect(await deliverReply(f.job,settings,send,'bot-test',undefined,'key',undefined,{},'DOWNER')).toBe('failure_owner_notified');
+  expect(posts).toHaveLength(1);expect(f.state.posts).toBe(0);
+});
+
+it('delivers the unique recovered result after a signed internal failure, without accepting two successful runs',async()=>{
+  const f=fixture();
+  const body=Buffer.from(JSON.stringify({text:'failed',seconds:0,tools:[],reviews:[],internalFailure:true})).toString('base64url');
+  f.state.previousOutputs=['relay-agent/1 '+body+'.'+createHmac('sha256','key').update('agent-result/1:ticket:'+body).digest('hex')];
+  f.state.runStatus='running';
+  expect(await deliverReply(f.job,config,f.send,undefined,undefined,'key')).toBe('waiting');
+  expect(f.state.posts).toBe(0);
+  f.state.runStatus='completed';
+  expect(await deliverReply(f.job,config,f.send,undefined,undefined,'key')).toBe('sent');
+  const ambiguous=fixture();ambiguous.state.previousOutputs=['another successful result'];
+  expect(await deliverReply(ambiguous.job,config,ambiguous.send,undefined,undefined,'key')).toBe('ambiguous_run');
+  expect(ambiguous.state.posts).toBe(0);
 });

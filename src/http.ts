@@ -125,6 +125,7 @@ function parsedEvent(value: unknown): SlackThreadEvent {
   return value as unknown as SlackThreadEvent;
 }
 function reason(error: unknown): string {
+  if (error instanceof Error && /^failure_notification_[a-z_]{1,110}$/.test(error.message)) return error.message;
   if (error instanceof Error && /^outbox_store_http_\d{3}$/.test(error.message)) return error.message;
   if (error instanceof TypeError && error.message.includes('Illegal invocation')) return 'invalid_fetch_receiver';
   if (
@@ -381,7 +382,7 @@ export async function processRelayPayload(raw: string, env: NodeJS.ProcessEnv, f
       try {
         const timeout=AbortSignal.timeout(45000);
         const action = await deliverReply(payload, config, (input,init={})=>fetchImpl(input,{...init,signal:init.signal?AbortSignal.any([init.signal,timeout]):timeout}), env.SLACK_CHANNEL_READ_TOKEN, env.SLACK_CHANNEL_SENDER_GRANTS, env.GITHUB_REVIEW_SIGNING_KEY, env.GITHUB_REVIEW_WORKSPACE_SLUG,
-          {businessChannel:env.BUSINESS_CHANNEL,businessSenders:env.BUSINESS_SENDERS,businessTestDm:env.BUSINESS_TEST_DM,businessGrants:env.BUSINESS_CHANNEL_SENDER_GRANTS});
+          {businessChannel:env.BUSINESS_CHANNEL,businessSenders:env.BUSINESS_SENDERS,businessTestDm:env.BUSINESS_TEST_DM,businessGrants:env.BUSINESS_CHANNEL_SENDER_GRANTS},env.GITHUB_REVIEW_SELF_CHANNEL);
         console.info('relay_reply', {action, issueId:payload.issueId, attempt:payload.attempt});
         return json({action});
       } catch (error) {

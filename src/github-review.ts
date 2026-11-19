@@ -30,6 +30,7 @@ export function genericReviewReply(request: string, output: string) {
 
 interface Presentation {
   internalFailure?: boolean;
+  failureCode?: string;
   text:string; url?:string; prUrl:string; tools:{name:string;count:number;failed:number}[];
   seconds:number; repositoryLine:string; models?:string[];
 }
@@ -48,6 +49,7 @@ function agentPresentation(output:string,ticket:string,key:string): Presentation
     if(data.models!==undefined && (!Array.isArray(data.models) || data.models.some((m:unknown)=>typeof m!=="string" || !/^[A-Za-z0-9][A-Za-z0-9._:/@+\-]{0,99}$/.test(m)))) return;
     if (data.internalFailure !== undefined && data.internalFailure !== true) return;
     if (data.internalFailure && data.reviews.length) return;
+    if (data.failureCode !== undefined && (typeof data.failureCode !== "string" || !/^[a-z_]{1,64}$/.test(data.failureCode))) return;
     const reviews:Presentation[]=[];
     for(const receipt of data.reviews) {
       if(typeof receipt!=="string" || !receipt.startsWith("relay-review/2 ")) return;
@@ -63,7 +65,7 @@ function agentPresentation(output:string,ticket:string,key:string): Presentation
       const sum=tools.get(call.name) || {name:call.name,count:0,failed:0};
       sum.count+=call.count; sum.failed+=call.failed; tools.set(call.name,sum);
     }
-    return {text:data.text,seconds:data.seconds,tools:[...tools.values()],prUrl:"",models:data.models,internalFailure:data.internalFailure,
+    return {text:data.text,seconds:data.seconds,tools:[...tools.values()],prUrl:"",models:data.models,internalFailure:data.internalFailure,failureCode:data.failureCode,
             repositoryLine:reviews.map(r=>r.repositoryLine).join("\n")};
   } catch { return; }
 }

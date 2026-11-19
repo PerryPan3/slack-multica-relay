@@ -1,3 +1,4 @@
+import { notifyOwnerFailure } from "./failure-notification.js";
 import { DurableOutbox } from "./durable-outbox.js";
 import { businessPresentation, businessAllowed, type BusinessScope } from "./semantic-route.js";
 import { genericReviewReply, reviewPresentation, reviewStatistics } from "./github-review.js";
@@ -106,6 +107,7 @@ export async function deliverReply(
   reviewKey?: string,
   reviewWorkspaceSlug?: string,
   businessScope: BusinessScope = {},
+  ownerChannel?: string,
 ) {
   const maxAttempts = config.durableScheduler ? 5040 : MAX_REPLY_ATTEMPTS;
   if (
@@ -185,10 +187,15 @@ export async function deliverReply(
       r.agent_id === config.multicaAgentId &&
       (r.trigger_comment_id || undefined) === trigger,
   );
-  const completed = runs.filter((r) => r.status === "completed");
+  const terminal = runs.filter((r) => r.status === "completed");
+  const recovered = terminal.filter(r => typeof r.result?.output !== 'string' ||
+    !reviewPresentation(r.result.output,frozen.context?.githubReviewTicket,reviewKey)?.internalFailure);
+  // A signed no-result failure is not a competing business answer after recovery.
+  const recovering = !recovered.length && runs.some(r => !["completed","failed","cancelled"].includes(r.status));
+  const completed = recovering ? [] : recovered.length === 1 ? recovered : terminal;
   let output: unknown;
   if (!completed.length) {
-    if (job.attempt < maxAttempts) {
+    if (job.attempt < maxAttempts && !(runs.length && runs.every(r=>r.status==="failed" || r.status==="cancelled"))) {
       await scheduleReply({ ...job, attempt: job.attempt + 1 }, config, send);
       return "waiting";
     }
@@ -209,7 +216,7 @@ export async function deliverReply(
     return "invalid_reply_text";
   const internal = reviewPresentation(output,frozen.context?.githubReviewTicket,reviewKey)?.internalFailure;
   const legacyFailure = /^(?:本次未启动执行：|本次 Agent 未能启动|本次执行超过等待时限|这次任务已失败或取消|等待执行结果的时间已到|这条消息没有启动 GitHub 审查)/u.test(output);
-  if (!e.channelId.startsWith('D') && (internal || legacyFailure)) return "internal_failure_suppressed";
+
   const headers = { authorization: "Bearer " + config.slackContextToken };
   const blockId = "relay-delivery-" + digest(ledger);
   async function readThread(oldest: string, latest?: string) {
@@ -274,6 +281,13 @@ export async function deliverReply(
   const business = businessPresentation(output, frozen.context?.githubReviewTicket, reviewKey);
   if (output.startsWith("relay-business/") && !business) return "invalid_business_receipt";
   if (business && !businessAllowed(e,businessScope,ownerId,config.teamId)) return "reply_scope_rejected";
+  if (internal || legacyFailure || review?.failureCode) {
+    const notification=await notifyOwnerFailure(e,job.message,review?.failureCode || 'execution_failed',ownerChannel,config,send);
+    if (internal || legacyFailure) {
+      if (notification!=='failure_notification_unconfigured') return notification;
+      if (!e.channelId.startsWith('D')) return 'internal_failure_suppressed';
+    }
+  }
   const visible = business?.text || review?.text || (frozen.context?.githubReviewTicket ? output.trim() : genericReviewReply(e.text, output));
   if (Array.from(visible).length>32000) return "invalid_reply_text";
   const agentOutput=output.startsWith("relay-agent/1 ");
