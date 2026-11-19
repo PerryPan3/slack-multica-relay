@@ -1,7 +1,7 @@
 import { expect, it } from 'vitest';
 import { notifyOwnerFailure } from '../src/failure-notification.js';
 import type { RelayConfig } from '../src/config.js';
-const config={allowedSenderIds:new Set(['U1']),targetUserIds:new Set(['U1']),teamId:'T1',slackContextToken:'test',
+const config={allowedChannelIds:new Set(['D1']),blockedChannelIds:new Set<string>(),allowedSenderIds:new Set(['U1']),targetUserIds:new Set(['U1']),teamId:'T1',slackContextToken:'test',
   multicaWorkspaceId:'w',multicaProjectId:'p',multicaAgentId:'a',kvRestApiUrl:'https://kv.test'} as RelayConfig;
 const event={teamId:'T1',channelId:'C1',senderUserId:'U2',threadTs:'1.000',messageTs:'2.000',text:'private input',mention:{type:'user' as const,id:'U1'}};
 function fixture() {
@@ -15,8 +15,7 @@ function fixture() {
       if(cmd==='SET') {if(args.includes('NX') && values.has(key))return Response.json({result:null});values.set(key,value);return Response.json({result:'OK'});}
       if(cmd==='EVAL') {values.delete(args[0]);return Response.json({result:1});}
     }
-    if(path.includes('/auth.test'))return Response.json({ok:true,user_id:'U1',team_id:state.team});
-    if(path.includes('/conversations.info'))return Response.json({ok:true,channel:{id:'D1',is_im:true,user:state.user}});
+    if(path.includes('/auth.test'))return Response.json({ok:true,user_id:state.user,team_id:state.team});
     if(path.includes('/conversations.history'))return Response.json({ok:true,messages:state.unknown?[]:state.posts});
     if(path.endsWith('/chat.postMessage')) {
       if(state.rate)return new Response('',{status:429});
@@ -63,4 +62,10 @@ it('retries a definitive rate rejection without duplicating an accepted message'
   f.state.rate=false;
   expect(await notifyOwnerFailure(event,'m','execution_failed','D1',config,f.send)).toBe('failure_owner_notified');
   expect(f.state.posts).toHaveLength(1);
+});
+
+it('rejects a DM outside the deployment allowlist without requiring additional metadata scopes',async()=>{
+  const f=fixture();
+  await expect(notifyOwnerFailure(event,'m','execution_failed','DOTHER',config,f.send)).rejects.toThrow('identity_rejected');
+  expect(f.state.posts).toHaveLength(0);
 });

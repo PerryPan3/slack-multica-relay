@@ -13,6 +13,8 @@ const reasons: Record<string,string> = {
 export async function notifyOwnerFailure(event:SlackThreadEvent, message:string, code:string,
   ownerChannel:string|undefined, config:RelayConfig, send:typeof fetch) {
   if (!ownerChannel || !/^D[A-Z0-9]+$/.test(ownerChannel)) return 'failure_notification_unconfigured';
+  if (!config.allowedChannelIds.has(ownerChannel) || config.blockedChannelIds.has(ownerChannel))
+    throw new Error('failure_notification_identity_rejected');
   const destination=ownerChannel;
   const [owner]=config.allowedSenderIds;
   if (config.allowAllSenders || config.allowedSenderIds.size!==1 || !config.targetUserIds.has(owner))
@@ -33,8 +35,9 @@ export async function notifyOwnerFailure(event:SlackThreadEvent, message:string,
     return body;
   }
   const identity=await read('auth.test');
-  const {channel}=await read('conversations.info',{channel:ownerChannel});
-  if(identity.user_id!==owner || identity.team_id!==config.teamId || !channel?.is_im || channel.is_mpim || channel.user!==owner || channel.id!==ownerChannel)
+  // Destination comes only from the deployment's verified owner self-DM, never the requester.
+  // Reading DM metadata would require im:read, beyond the installed history/write scopes.
+  if(identity.user_id!==owner || identity.team_id!==config.teamId)
     throw new Error('failure_notification_identity_rejected');
   const marker='relay-delivery-'+digest(ledger);
   async function verify(ts?:string) {

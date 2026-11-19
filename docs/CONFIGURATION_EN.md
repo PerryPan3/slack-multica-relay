@@ -293,7 +293,7 @@ In durable mode, frozen request context is also retained for seven days so repli
 
 ### Private owner failure notifications
 
-`GITHUB_REVIEW_SELF_CHANNEL` also selects the owner DM for terminal operational failures. Before posting, the Worker checks token team/user and the DM's `is_im` and owner identity. Notifications contain a safe error category and source link, never raw diagnostics, credentials, or source conversation text. Signed `failureCode` may accompany partial review receipts; only the valid business result returns to the source thread.
+`GITHUB_REVIEW_SELF_CHANNEL` also selects the owner DM for terminal operational failures. Deployment verifies the DM's `is_im` and owner identity and places it in the channel allowlist. Before each post, the Worker checks token team/user and accepts the destination only from this server-side configuration, never the requester. Notifications use existing history/write scopes and do not require `im:read`. Notifications contain a safe error category and source link, never raw diagnostics, credentials, or source conversation text. Signed `failureCode` may accompany partial review receipts; only the valid business result returns to the source thread.
 
 An independent persistent ledger deduplicates notifications by request. Unknown writes require marker readback and are never blindly reposted. Legacy deployments without the owner DM keep suppressing channel failures; configure the DM before claiming notification coverage.
 

@@ -371,7 +371,6 @@ it('routes an authenticated failed run to the owner DM, never to its source grou
   const send:typeof fetch=async(url,init)=>{
     const path=String(url);
     if(path.includes('/auth.test'))return Response.json({ok:true,user_id:'U1',team_id:'T1'});
-    if(path.includes('/conversations.info'))return Response.json({ok:true,channel:{id:'DOWNER',is_im:true,user:'U1'}});
     if(path.includes('/conversations.history'))return Response.json({ok:true,messages:posts});
     if(path.endsWith('/chat.postMessage')) {
       const message=JSON.parse(String(init?.body));expect(message.channel).toBe('DOWNER');
@@ -380,7 +379,7 @@ it('routes an authenticated failed run to the owner DM, never to its source grou
     }
     return f.send(url,init);
   };
-  const settings={...config,allowedChannelIds:new Set(['D1','C1'])};
+  const settings={...config,allowedChannelIds:new Set(['D1','C1','DOWNER'])};
   for(let i=0;i<2;i++)expect(await deliverReply(f.job,settings,send,'bot-test',undefined,'key',undefined,{},'DOWNER')).toBe('failure_owner_notified');
   expect(posts).toHaveLength(1);expect(f.state.posts).toBe(0);
 });
