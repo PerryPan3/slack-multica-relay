@@ -8,6 +8,7 @@ from pathlib import Path
 import subprocess
 import time
 import urllib.request
+from urllib.parse import urlsplit
 import fcntl
 
 import review_evidence
@@ -32,12 +33,20 @@ def enabled():
 
 def reachable():
     # Check the same ChatGPT transport used by this runtime, without generating tokens.
+    proxy=configuration().get('model_proxy')
+    options=[]
+    if proxy:
+        parsed=urlsplit(proxy)
+        if (parsed.scheme!='http' or parsed.hostname not in ('127.0.0.1','localhost') or not parsed.port or
+                parsed.username or parsed.password or parsed.path or parsed.query or parsed.fragment):
+            raise ValueError('model_proxy must be a local HTTP proxy without credentials')
+        options=['--proxy',proxy]
     try:
         result = subprocess.run(
-            ["/usr/bin/curl", "--silent", "--head", "--connect-timeout", "3", "--max-time", "5",
+            ["/usr/bin/curl", "--silent", "--head", "--connect-timeout", "8" if proxy else "3", "--max-time", "12" if proxy else "5",
              "--output", "/dev/null", "--write-out", "%{http_code}",
-             "https://chatgpt.com/backend-api/codex/models"],
-            capture_output=True, text=True, timeout=6,
+             *options,"https://chatgpt.com/backend-api/codex/models"],
+            capture_output=True, text=True, timeout=13 if proxy else 6,
             env={"PATH": "/usr/bin:/bin"})
         return result.returncode == 0 and result.stdout in ("200", "401", "403", "404", "405")
     except (OSError, subprocess.SubprocessError):

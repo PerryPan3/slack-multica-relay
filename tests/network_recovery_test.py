@@ -11,6 +11,16 @@ import network_recovery as recovery
 
 
 class NetworkRecoveryTests(unittest.TestCase):
+    def test_probe_uses_configured_local_model_proxy_without_disabling_tls(self):
+        with patch.object(recovery,'configuration',return_value={'model_proxy':'http://127.0.0.1:7897'}), \
+             patch.object(recovery.subprocess,'run',return_value=subprocess.CompletedProcess([],0,'405','')) as run:
+            self.assertTrue(recovery.reachable())
+            command=run.call_args.args[0]
+            self.assertIn('--proxy',command);self.assertIn('http://127.0.0.1:7897',command)
+            self.assertNotIn('--insecure',command);self.assertEqual(run.call_args.kwargs['timeout'],13)
+        with patch.object(recovery,'configuration',return_value={'model_proxy':'http://remote.example:7897'}):
+            with self.assertRaises(ValueError):recovery.reachable()
+
     def test_models_endpoint_head_not_allowed_still_proves_connectivity(self):
         with patch.object(recovery.subprocess,'run',return_value=subprocess.CompletedProcess([],0,'405','')):
             self.assertTrue(recovery.reachable())

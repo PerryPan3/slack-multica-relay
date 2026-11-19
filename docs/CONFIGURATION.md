@@ -94,7 +94,7 @@ reaction 添加、查询和清理统一使用非空 `SLACK_BOT_TOKEN`，未配�
 
 ### 模型连接中断与自动续接
 
-ChatGPT 登录方式的本机 Runtime 可通过私有 `agent/recovery.json` 启用连接恢复。配置包含 `enabled: true`、`worker_url`、`multica` 可执行文件、`profile`、`server_url`、`workspace_id`。不放入凭据；沿用本机 Multica profile 与私有 review signing key。通过本机服务管理器每分钟运行一次 `scripts/network_recovery.py`，不创建模型定时任务。先部署 Worker 的 `/api/runtime/recovery`，再启用本机配置。
+ChatGPT 登录方式的本机 Runtime 可通过私有 `agent/recovery.json` 启用连接恢复。配置包含 `enabled: true`、`worker_url`、`multica` 可执行文件、`profile`、`server_url`、`workspace_id`。不放入凭据；沿用本机 Multica profile 与私有 review signing key。通过本机服务管理器每分钟运行一次 `scripts/network_recovery.py`，不创建模型定时任务。若模型 CLI 使用已有本机 HTTP 代理，增加 `model_proxy`，仅允许无凭据的 localhost / 127.0.0.1 地址，并在模型 CLI 的私有环境配置相同代理；健康检查保留 TLS 校验，代理握手最长等待 12 秒。先部署 Worker 的 `/api/runtime/recovery`，再启用本机配置。
 
 执行前先检查模型服务连接。模型客户端持续报告连接失败达 30 秒时退出等待；主模型 60 秒没有输出且轻量连接检查失败时保存会话并退出，释放 Multica 名额；连接可达但连续 5 分钟无进展时同样退出。进行中的工具调用最多有 5 分钟完成和记录回执。准备阶段的模型判断限制为 90 秒。断网等待记录保存在私有 `runs/network-wait/`，不发群聊故障消息、不反复调用模型。
 
