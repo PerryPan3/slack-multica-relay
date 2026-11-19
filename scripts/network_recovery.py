@@ -38,7 +38,7 @@ def reachable():
              "https://chatgpt.com/backend-api/codex/models"],
             capture_output=True, text=True, timeout=6,
             env={"PATH": "/usr/bin:/bin"})
-        return result.returncode == 0 and result.stdout in ("200", "401", "403", "404")
+        return result.returncode == 0 and result.stdout in ("200", "401", "403", "404", "405")
     except (OSError, subprocess.SubprocessError):
         return False
 
@@ -126,7 +126,8 @@ def recovery_target(args, config, key, dispatch_unknown=None):
     stamp = str(int(time.time()))
     signature = hmac.new(key, ("network-recovery/1:" + stamp + ":" + body).encode(), hashlib.sha256).hexdigest()
     request = urllib.request.Request(config["worker_url"] + "/api/runtime/recovery", data=body.encode(),
-        headers={"Content-Type": "application/json", "X-Relay-Time": stamp, "X-Relay-Signature": signature})
+        headers={"Content-Type": "application/json", "User-Agent": "PerryRelayRecovery/1.0",
+                 "X-Relay-Time": stamp, "X-Relay-Signature": signature})
     with urllib.request.urlopen(request, timeout=15) as response:
         return json.load(response)
 

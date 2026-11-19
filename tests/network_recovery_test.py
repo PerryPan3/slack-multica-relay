@@ -11,6 +11,12 @@ import network_recovery as recovery
 
 
 class NetworkRecoveryTests(unittest.TestCase):
+    def test_models_endpoint_head_not_allowed_still_proves_connectivity(self):
+        with patch.object(recovery.subprocess,'run',return_value=subprocess.CompletedProcess([],0,'405','')):
+            self.assertTrue(recovery.reachable())
+        with patch.object(recovery.subprocess,'run',return_value=subprocess.CompletedProcess([],28,'000','timeout')):
+            self.assertFalse(recovery.reachable())
+
     def test_silent_disconnection_releases_slot_but_tool_call_can_settle(self):
         watch=recovery.ProgressWatch(0)
         with self.assertRaises(recovery.NetworkWait):watch.check(61,lambda:False)
