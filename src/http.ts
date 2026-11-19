@@ -381,7 +381,7 @@ export async function processRelayPayload(raw: string, env: NodeJS.ProcessEnv, f
       try {
         const timeout=AbortSignal.timeout(45000);
         const action = await deliverReply(payload, config, (input,init={})=>fetchImpl(input,{...init,signal:init.signal?AbortSignal.any([init.signal,timeout]):timeout}), env.SLACK_CHANNEL_READ_TOKEN, env.SLACK_CHANNEL_SENDER_GRANTS, env.GITHUB_REVIEW_SIGNING_KEY, env.GITHUB_REVIEW_WORKSPACE_SLUG,
-          {businessChannel:env.BUSINESS_CHANNEL,businessSenders:env.BUSINESS_SENDERS,businessTestDm:env.BUSINESS_TEST_DM,businessGrants:env.BUSINESS_CHANNEL_SENDER_GRANTS});
+          {businessChannel:env.BUSINESS_CHANNEL,businessSenders:env.BUSINESS_SENDERS,businessTestDm:env.BUSINESS_TEST_DM,businessGrants:env.BUSINESS_CHANNEL_SENDER_GRANTS},env.GITHUB_REVIEW_SELF_CHANNEL);
         console.info('relay_reply', {action, issueId:payload.issueId, attempt:payload.attempt});
         return json({action});
       } catch (error) {

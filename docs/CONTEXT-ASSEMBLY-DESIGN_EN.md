@@ -147,3 +147,5 @@ An explicit status-only or no-vote request stays read-only for that turn. Withdr
 Retries retain the same GitHub write marker. An uncertain previous submission is reconciled by author, commit, marker and review state before any further write. Legacy tasks can migrate only with the original signed request, the host's formal review dispatch record and its matching unfinished record. Old reply text alone never grants authority.
 
 A merged or closed PR ends the pending delegation without claiming a new approval. Existing review links remain attributed to their actual authors.
+
+An unrecoverable native execution includes HMAC-bound `failureCode`. The Worker sends a safe category and source link to the verified owner DM using a separate per-request delivery ledger. Confirmed partial review receipts remain deliverable to the original thread. Raw diagnostics never enter notifications.

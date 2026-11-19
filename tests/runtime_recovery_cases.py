@@ -66,6 +66,29 @@ class ProcessRecoveryTests(unittest.TestCase):
             self.assertEqual(outcome['attempts'],2)
             self.assertEqual(outcome['retries'][0]['error_code'],'model_capacity')
 
+    def test_json_encoded_unsupported_model_has_actionable_safe_reason(self):
+        error=runtime.ModelFailure({'message':json.dumps({'status':400,'error':{'code':'model_not_found','message':'private diagnostic'}})})
+        self.assertEqual(error.code,'model_not_found')
+        self.assertFalse(error.retryable)
+        self.assertNotIn('private diagnostic',runtime.execution_failure(error))
+
+    def test_only_rejected_model_with_no_side_effects_can_recover_same_ticket(self):
+        args={'ticket':'request'};key=b'key';identity='id'
+        error={'error':{'code':'model_not_found'}}
+        previous={'request':identity,'status':'interrupted','diagnostic':'ModelFailure: '+json.dumps(error)}
+        operations=SimpleNamespace(counts={},receipts=[],model='old-model')
+        saved=runtime.envelope('failed',operations,args,key,1,internal_failure=True)
+        with patch.object(runtime,'model_settings',return_value={'model':'gpt-6-astra'}):
+            self.assertTrue(runtime.changed_unsupported_model(saved,previous,identity,key,'request'))
+            self.assertFalse(runtime.changed_unsupported_model(saved,None,identity,key,'request'))
+            self.assertFalse(runtime.changed_unsupported_model(saved,previous,identity,key,'other'))
+            self.assertFalse(runtime.changed_unsupported_model(saved,{**previous,'status':'completed'},identity,key,'request'))
+            operations.counts={'GitHub':{'name':'GitHub','count':1,'failed':0}}
+            unsafe=runtime.envelope('failed',operations,args,key,1,internal_failure=True)
+            self.assertFalse(runtime.changed_unsupported_model(unsafe,previous,identity,key,'request'))
+        with patch.object(runtime,'model_settings',return_value={'model':'old-model'}):
+            self.assertFalse(runtime.changed_unsupported_model(saved,previous,identity,key,'request'))
+
     def test_unknown_and_usage_errors_do_not_retry(self):
         for message in ('Quota exceeded. Check your plan and billing details.','Invalid API key','unknown failure'):
             error=runtime.ModelFailure({'message':message})
@@ -101,13 +124,17 @@ class ProcessRecoveryTests(unittest.TestCase):
                     runtime.run_model(command,input='',text=True,stdout=out,stderr=err,cwd=root,env={},timeout=3)
                 self.assertLess(time.monotonic()-started,2)
 
-    def test_runtime_inherits_configured_priority_service(self):
+    def test_runtime_uses_private_model_even_when_desktop_changes(self):
         with tempfile.TemporaryDirectory() as folder:
             root=Path(folder);(root/'.codex').mkdir()
             (root/'.codex/config.toml').write_text('model="test-model"\nmodel_reasoning_effort="high"\nservice_tier="priority"\n')
-            with patch.object(runtime.Path,'home',return_value=root):
+            (root/'agent').mkdir()
+            (root/'agent/config.json').write_text(json.dumps({'model':'gpt-6-astra','service_tier':'default'}))
+            with patch.object(runtime.Path,'home',return_value=root),patch.object(runtime.review_evidence,'PRIVATE',root):
                 home=runtime.prepare_home(root,{},1234,'nonce',SimpleNamespace())
-            self.assertEqual(runtime.tomllib.loads((home/'config.toml').read_text())['service_tier'],'priority')
+            config=runtime.tomllib.loads((home/'config.toml').read_text())
+            self.assertEqual(config['model'],'gpt-6-astra')
+            self.assertEqual(config['service_tier'],'default')
 
     def test_new_request_and_resumed_thread_receive_the_current_profile(self):
         from contextlib import contextmanager

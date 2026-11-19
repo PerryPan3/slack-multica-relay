@@ -358,3 +358,27 @@ it("suppresses signed internal failures in channels but keeps private diagnostic
   const normal=fixture(group);normal.state.output='需要确认业务所说的活跃用户是否包含试用账号。';
   expect(await deliverReply(normal.job,settings,normal.send,'bot-test')).toBe('sent');
 });
+
+it('routes an authenticated failed run to the owner DM, never to its source group',async()=>{
+  const group={...event,channelId:'C1'};
+  const f=fixture(group);
+  const packet={text:'internal diagnostic',seconds:0,tools:[],reviews:[],internalFailure:true,failureCode:'model_not_found'};
+  const body=Buffer.from(JSON.stringify(packet)).toString('base64url');
+  f.state.output='relay-agent/1 '+body+'.'+createHmac('sha256','key').update('agent-result/1:ticket:'+body).digest('hex');
+  const posts:any[]=[];
+  const send:typeof fetch=async(url,init)=>{
+    const path=String(url);
+    if(path.includes('/auth.test'))return Response.json({ok:true,user_id:'U1',team_id:'T1'});
+    if(path.includes('/conversations.info'))return Response.json({ok:true,channel:{id:'DOWNER',is_im:true,user:'U1'}});
+    if(path.includes('/conversations.history'))return Response.json({ok:true,messages:posts});
+    if(path.endsWith('/chat.postMessage')) {
+      const message=JSON.parse(String(init?.body));expect(message.channel).toBe('DOWNER');
+      posts.push({...message,user:'U1',ts:'20.001'});
+      return Response.json({ok:true,channel:'DOWNER',ts:'20.001'});
+    }
+    return f.send(url,init);
+  };
+  const settings={...config,allowedChannelIds:new Set(['D1','C1'])};
+  for(let i=0;i<2;i++)expect(await deliverReply(f.job,settings,send,'bot-test',undefined,'key',undefined,{},'DOWNER')).toBe('failure_owner_notified');
+  expect(posts).toHaveLength(1);expect(f.state.posts).toBe(0);
+});

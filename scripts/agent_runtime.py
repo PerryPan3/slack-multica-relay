@@ -97,6 +97,14 @@ class ModelFailure(Exception):
         if message.startswith('exceeded retry limit, last status: 429'):
             self.code='model_rate_limit'
             self.public_reason='模型服务返回 HTTP 429 限流，Codex 内部重试后仍失败'
+        try:
+            detail=json.loads(message)
+        except (ValueError,TypeError):
+            detail=error
+        code=detail.get('error',detail) if isinstance(detail,dict) else {}
+        if isinstance(code,dict) and code.get('code')=='model_not_found':
+            self.code='model_not_found'
+            self.public_reason='当前 Slack Agent 模型不受此登录方式支持，需要修正专用模型配置'
         super().__init__(message[:2000] or 'Model turn failed without an error message.')
 
 
@@ -250,9 +258,10 @@ def save_execution(path,outcome):
     temporary.replace(path)
 
 
-def envelope(text,tools,args,key,seconds,internal_failure=False):
+def envelope(text,tools,args,key,seconds,internal_failure=False,failure_code=None):
     packet={"text":text,"seconds":seconds,"tools":list(tools.counts.values()),"reviews":tools.receipts,"models":[tools.model] if getattr(tools,"model",None) else []}
     if internal_failure: packet["internalFailure"]=True
+    if failure_code: packet["failureCode"]=failure_code
     body=base64.urlsafe_b64encode(json.dumps(packet,ensure_ascii=False).encode()).decode().rstrip("=")
     sig=hmac.new(key,("agent-result/1:"+args["ticket"]+":"+body).encode(),hashlib.sha256).hexdigest()
     return "relay-agent/1 "+body+"."+sig
@@ -406,12 +415,38 @@ def running_gateway(operations,audit_path):
         sock.close()
 
 
+def model_settings():
+    path=review_evidence.PRIVATE/'agent/config.json'
+    private=json.loads(path.read_text()) if path.exists() else {}
+    settings={name:private.get(name) or default for name,default in
+              [('model','gpt-6-astra'),('model_reasoning_effort','high'),('service_tier','default')]}
+    if (not isinstance(settings['model'],str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,99}',settings['model'])
+        or settings['model_reasoning_effort'] not in ('low','medium','high','xhigh')
+        or settings['service_tier'] not in ('default','priority')):
+        raise ProfileError('Slack Agent 专用模型配置无效，需要检查私有配置。')
+    return settings
+
+
+def changed_unsupported_model(saved,previous,identity,key,ticket):
+    # Only a model rejection before any tools ran is safe to replay automatically.
+    if not previous or previous.get('request')!=identity or previous.get('status')!='interrupted':return False
+    if ModelFailure({'message':previous.get('diagnostic','').removeprefix('ModelFailure: ')}).code!='model_not_found':return False
+    try:
+        body,mac=saved.removeprefix('relay-agent/1 ').split('.')
+        expected=hmac.new(key,('agent-result/1:'+ticket+':'+body).encode(),hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(expected,mac):return False
+        packet=json.loads(base64.urlsafe_b64decode(body+'='*(-len(body)%4)))
+        return (packet.get('internalFailure') is True and packet.get('tools')==[] and packet.get('reviews')==[]
+                and packet.get('models')!=[model_settings()['model']])
+    except (ValueError,TypeError):return False
+
+
 def prepare_home(directory,claim,port,nonce,operations):
     home=directory/"home"
     home.mkdir(exist_ok=True,mode=0o700)
     auth=home/"auth.json"
     if not auth.exists(): auth.symlink_to(review_evidence.PRIVATE/"model-home/auth.json")
-    settings=tomllib.loads((Path.home()/".codex/config.toml").read_text())
+    settings=model_settings()
     operations.model=settings.get("model","gpt-6-astra")
     hook=("import json,sys; n=json.load(sys.stdin).get('tool_name',''); "
           "d='allow' if n.startswith('mcp__relay__') else 'deny'; "
@@ -455,9 +490,10 @@ def execute(args):
                 time.sleep(.1)
         db.execute("create table if not exists replies(id text primary key,reply text)")
         saved=db.execute("select reply from replies where id=?",(identity,)).fetchone()
-        if saved: return {"reply":saved[0]}
         outcome_file=directory/"last-execution.json"
         previous=prior_execution(outcome_file)
+        if saved and not changed_unsupported_model(saved[0],previous,identity,key,args['ticket']):
+            return {"reply":saved[0]}
         outcome={"request":identity,"status":"running","phase":"preparing","started":started}
         save_execution(outcome_file,outcome)
         session_file=directory/"session"
@@ -475,7 +511,7 @@ def execute(args):
                     final_file=directory/(identity+".final")
                     command=[str(review_evidence.PRIVATE/"bin/codex"),"exec"]
                     if session_file.exists(): command+=["resume",session_file.read_text().strip()]
-                    command+=["--skip-git-repo-check","--json","-o",str(final_file),"-"]
+                    command+=["--skip-git-repo-check","--model",model_settings()["model"],"--json","-o",str(final_file),"-"]
                     payload=INSTRUCTIONS+profile_prompt(profile)+"\n"+json.dumps({
                         "current_request":event["text"],"same_thread":claim["history"],"context_partial":claim["partial"],
                         "review_targets":claim["targets"],"review_assignments":review_assignments,"available_services":operations.services(),
@@ -500,8 +536,9 @@ def execute(args):
                     # The per-run transport token is no longer valid after shutdown.
                     (home/"config.toml").write_text('approval_policy="never"\nsandbox_mode="read-only"\n')
         reply=envelope(result,operations,args,key,int(time.time())-started,
-                       internal_failure=outcome["status"]!="completed" and not operations.receipts)
-        db.execute("insert into replies values(?,?)",(identity,reply))
+                       internal_failure=outcome["status"]!="completed" and not operations.receipts,
+                       failure_code=(outcome.get("error_code") or "execution_failed") if outcome["status"]!="completed" else None)
+        db.execute("insert or replace into replies values(?,?)",(identity,reply))
         db.commit()
         return {"reply":reply}
 
