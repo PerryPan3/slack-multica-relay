@@ -26,7 +26,10 @@ export async function notifyOwnerFailure(event:SlackThreadEvent, message:string,
   async function read(method:string,query:Record<string,string>={}) {
     const response=await send('https://slack.com/api/'+method+'?'+new URLSearchParams(query),{headers});
     const body=await response.json();
-    if (!response.ok || !body.ok) throw new Error('failure_notification_read_failed');
+    if (!response.ok || !body.ok) {
+      const code=typeof body.error==='string' && /^[a-z_]{1,64}$/.test(body.error) ? body.error : 'read_failed';
+      throw new Error('failure_notification_'+method.replace('.','_')+'_'+code);
+    }
     return body;
   }
   const identity=await read('auth.test');
