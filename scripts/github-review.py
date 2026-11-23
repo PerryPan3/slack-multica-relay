@@ -123,7 +123,7 @@ def received(rows, attempt, head, decision=None):
     for r in reversed(rows):
         if r["user"]["login"].lower() != LOGIN.lower() or r["commit_id"] != head:
             continue
-        if r["state"] not in ("APPROVED", "CHANGES_REQUESTED"):
+        if r["state"] not in ((decision,) if decision else ("APPROVED", "CHANGES_REQUESTED")):
             continue
         body = r.get("body") or ""
         if attempt in body:
@@ -278,7 +278,7 @@ def finish(repo, number, endpoint, pr, state, ticket, output, db, history=(), po
         text = "暂缓审批 · " + repo.split("/")[1] + " #" + str(number) + " · " + row[1][:8]
         return signed_result(repo,number,pr,ticket,text+"\n\n"+summary+"\n\n"+details,row[2],decision,
                              history=history,policy=policy,prior_calls=prior_calls)
-    states = {"APPROVE":"APPROVED", "REQUEST_CHANGES":"CHANGES_REQUESTED"}
+    states = {"APPROVE":"APPROVED", "REQUEST_CHANGES":"CHANGES_REQUESTED", "COMMENT":"COMMENTED"}
     if decision not in states:
         raise Stop("Agent 未给出明确的审查决定。")
     if decision == "APPROVE" and (not isinstance(verified_standards, dict)
@@ -289,12 +289,15 @@ def finish(repo, number, endpoint, pr, state, ticket, output, db, history=(), po
     if not summary and not details:
         raise Stop("缺少可发布的审查依据，未提交审批。")
     review_body = "\n\n".join(part for part in (summary,details) if part)
+    if decision == "APPROVE" and verified_standards.get("resolution") == "evidence_review":
+        review_body += "\n\n静态工具无法解析部分模板；已按当前提交逐项核对相关规范与实现并完成补充审查，不代表静态检查器已完整通过。"
     marker = "<!-- perry-relay-review " + state + " -->"
     reviews = api(endpoint + "/reviews?per_page=100", pages=True)
     record = received(reviews, marker, row[1], states[decision])
     if not record:
         db.execute("create table if not exists pending_reviews(target text primary key, review integer not null)")
         target = f"{repo.lower()}/{number}@{row[0]}..{row[1]}"
+        if decision == "COMMENT": target += ":comment"
         saved = db.execute("select review from pending_reviews where target=?", (target,)).fetchone()
         if not saved:
             pending=[r for r in reviews if r.get("state")=="PENDING" and r.get("commit_id")==row[1]
@@ -336,7 +339,7 @@ def finish(repo, number, endpoint, pr, state, ticket, output, db, history=(), po
     if receipt["commit_id"] != row[1] or receipt["state"] != states[decision] or receipt["user"]["login"].lower() != LOGIN.lower():
         raise Stop("GitHub 回执与预期不一致，未确认审批。")
     fresh = api(endpoint)
-    lead = ("已 Approve" if decision=="APPROVE" else "已 Request changes") + " · " + repo.split("/")[1] + " #" + str(number) + " · " + row[1][:8]
+    lead = {"APPROVE":"已 Approve", "REQUEST_CHANGES":"已 Request changes", "COMMENT":"已提交审查评论，尚未批准"}[decision] + " · " + repo.split("/")[1] + " #" + str(number) + " · " + row[1][:8]
     if revision(fresh) != revision(pr):
         lead += "（审批后 PR 已更新，需要重审）"
     # If GitHub already had this verdict on this SHA, show the actual recorded reasoning.

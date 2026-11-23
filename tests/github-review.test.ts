@@ -47,3 +47,13 @@ it("validates batch receipts and aggregates only verified child approvals",()=>{
   expect(parsed.tools[0].count).toBe(3);
   expect(reviewPresentation(sign({...value,reviews:[child+"bad"]},"relay-agent/1 ","agent-result/1:"),"ticket","key")).toBeUndefined();
 });
+
+it("links a verified comment receipt without labeling it as approval",()=>{
+  const value={repo:"team/repo",number:19,review:123,sha:"a".repeat(40),seconds:25,text:"Evidence gap",status:"COMMENT",tools:[]};
+  const sign=(v:unknown)=>{const body=Buffer.from(JSON.stringify(v)).toString("base64url");return "relay-review/2 "+body+"."+createHmac("sha256","key").update("receipt:ticket:"+body).digest("hex");};
+  const result=reviewPresentation(sign(value),"ticket","key")!;
+  expect(result.url).toContain("pullrequestreview-123");
+  expect(result.repositoryLine).toContain("审查评论（未批准）");
+  expect(result.repositoryLine).not.toContain("Approve");
+  expect(reviewPresentation(sign({...value,review:null}),"ticket","key")).toBeUndefined();
+});

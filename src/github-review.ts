@@ -85,7 +85,7 @@ export function reviewPresentation(output: string, ticket: unknown, key?: string
       !Number.isSafeInteger(r.number) || r.number < 1 || typeof r.sha !== "string" ||
       !/^[a-f0-9]{8,40}$/.test(r.sha) || !Number.isSafeInteger(r.seconds) || r.seconds < 0) return;
     const modern = output.startsWith("relay-review/2 ");
-    if (modern && !["APPROVE", "REQUEST_CHANGES", "INCOMPLETE", "INSPECTED"].includes(r.status)) return;
+    if (modern && !["APPROVE", "REQUEST_CHANGES", "COMMENT", "INCOMPLETE", "INSPECTED"].includes(r.status)) return;
     const incomplete = modern && ["INCOMPLETE", "INSPECTED"].includes(r.status);
     if (incomplete ? r.review !== null : (!Number.isSafeInteger(r.review) || r.review < 1)) return;
     const tools: {name:string; count:number; failed:number}[] = modern ? r.tools : [];
@@ -99,7 +99,7 @@ export function reviewPresentation(output: string, ticket: unknown, key?: string
     return { text: r.text as string, url, prUrl, tools, seconds: r.seconds as number,
       repositoryLine: "🔗 " + r.repo.split("/")[1] + (branch ? " · `" + branch + "`" : "") +
         " · <" + prUrl + "|PR #" + r.number + "> · `" + r.sha.slice(0,8) + "`" +
-        (url ? " · <" + url + "|" + (r.status === "REQUEST_CHANGES" ? "Request changes" : modern ? "Approve" : "GitHub 审批") + ">" : r.status === "INSPECTED" ? " · 只读复核" : " · 暂缓审批") };
+        (url ? " · <" + url + "|" + (r.status === "COMMENT" ? "审查评论（未批准）" : r.status === "REQUEST_CHANGES" ? "Request changes" : modern ? "Approve" : "GitHub 审批") + ">" : r.status === "INSPECTED" ? " · 只读复核" : " · 暂缓审批") };
   } catch { return; }
 }
 

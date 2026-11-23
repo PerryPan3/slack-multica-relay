@@ -20,16 +20,16 @@ checker digest leaves the check incomplete and prevents approval.
 in material coverage. `review_standards` checks readiness without voting, including
 closed-PR retrospectives. Each assessment supplies `rule_id`, `status`, a concrete
 `reason` and `evidence: [{path, quote}]` matching pinned-head rules and implementation.
-Per-file requirements must cite every specified file. Manual statements cannot
-override static failures. `submit_review` rechecks these conditions and the revision;
+Per-file requirements must cite every specified file. Manual statements cannot override confirmed violations. A trusted checker may mark a known template limitation with `rule=static-analysis`, `incomplete=true`, and `code=unsupported_template`. The host creates a mandatory `static_resolution:*` assessment for each limitation. Each must affirmatively explain how pinned-head rules and implementation, plus necessary macro, schema, compiled, CI or data evidence, establish the original check. `not_applicable` cannot resolve it. Ordinary parse errors, missing inputs, digest mismatches and unknown exceptions remain blocking, as do confirmed violations. Static status remains incomplete and the published approval discloses the evidence-based review. `submit_review` rechecks these conditions and the revision;
 the legacy publication entry also rejects approval without host verification.
 
-Deterministic naming, materialization and column-registration checks share one
-implementation with repository CI. The Agent must separately evidence grain, test
+Naming, materialization and column-registration checks follow repository rules. The private host checker may classify capability limitations without weakening confirmed violations; differences from the CI version require replay verification. The Agent must separately evidence grain, test
 sufficiency, CTE responsibilities, layering and deployment requirements. CI success
 does not replace these assessments. Validate negative and positive cases before
 updating a private checker copy and digest. Do not publish private configuration or
 repository contents in this repository.
+
+When decisive evidence remains unavailable, native `submit_review(decision="COMMENT")` publishes completed checks, the specific gap and continuation conditions. Its GitHub receipt is verified, uses a separate per-task/per-head write identity, and leaves the assignment pending for a later verdict. Slack links it as a review comment, never an approval. Internal network errors must not generate PR comments.
 
 Configure these variables on the deployment platform. Credentials and tokens belong in its secret store. Slack IDs and service URLs are ordinary configuration values, although storing them as secrets is acceptable.
 

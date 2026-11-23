@@ -111,6 +111,53 @@ class StandardsTests(unittest.TestCase):
         self.gate.api = lambda path: original(path) if "/trees/" in path else {"encoding":"base64","content":"YmFk"}
         self.assertEqual(self.gate.prepare(self.target, self.pr, self.packet)["status"], "incomplete")
 
+    def use_checker(self, findings, status="incomplete"):
+        result = {"status": status, "findings": findings, "models": ["code.py"],
+                  "existing_findings": 0, "manual_rules": {}}
+        raw = ("def input_paths(changed, paths): return []\n"
+               "def affected_models(base, head, changed, paths): return []\n"
+               "def check_change(base, head, changed): return " + repr(result) + "\n").encode()
+        (self.root / "checker.py").write_bytes(raw)
+        self.policy["checker"] = {"file": "checker.py", "sha256": hashlib.sha256(raw).hexdigest()}
+        self.save_policy()
+        return self.gate.prepare(self.target, self.pr, self.packet)
+
+    def test_unsupported_template_requires_pinned_evidence_and_remains_disclosed(self):
+        finding = {"rule": "static-analysis", "path": "code.py", "incomplete": True,
+                   "code": "unsupported_template", "detail": "Project macro expansion is unsupported"}
+        state = self.use_checker([finding])
+        self.assertFalse(self.evaluate(self.assessments())["ok"])
+        resolution = {**self.assessments()[0], "rule_id": state["findings"][0]["resolution_rule"]}
+        complete = self.assessments() + [resolution]
+        result = self.evaluate(complete)
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["static_status"], "incomplete")
+        self.assertEqual(result["resolution"], "evidence_review")
+        resolution["status"] = "not_applicable"
+        self.assertFalse(self.evaluate(complete)["ok"])
+        resolution["status"] = "pass"
+        resolution["evidence"] = [{"path": "code.py", "quote": "fabricated compiled output"}]
+        self.assertFalse(self.evaluate(complete)["ok"])
+
+    def test_parse_errors_unknown_failures_and_confirmed_violations_cannot_be_resolved(self):
+        for finding, status in [
+            ({"rule": "static-analysis", "path": "code.py", "incomplete": True,
+              "detail": "ParseError: invalid SQL"}, "incomplete"),
+            ({"rule": "explicit-output", "path": "code.py", "incomplete": False,
+              "code": "unsupported_template", "detail": "SELECT star"}, "fail")]:
+            state = self.use_checker([finding], status)
+            self.assertNotIn("resolution_rule", state["findings"][0])
+            self.assertFalse(self.evaluate(self.assessments())["ok"])
+
+    def test_one_resolved_limitation_does_not_hide_a_confirmed_violation(self):
+        state = self.use_checker([
+            {"rule": "static-analysis", "path": "code.py", "incomplete": True,
+             "code": "unsupported_template", "detail": "Macro expansion unsupported"},
+            {"rule": "column-registration", "path": "code.py", "incomplete": False}], "fail")
+        entries = self.assessments() + [{**self.assessments()[0],
+                                      "rule_id": state["findings"][0]["resolution_rule"]}]
+        self.assertFalse(self.evaluate(entries)["ok"])
+
 
 if __name__ == "__main__":
     unittest.main()

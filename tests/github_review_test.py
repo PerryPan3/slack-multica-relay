@@ -205,6 +205,32 @@ class ApprovalTests(unittest.TestCase):
         self.assertIsNone(receipt["review"])
         self.assertTrue(receipt["text"].startswith("暂缓审批"))
 
+    def test_comment_is_published_once_and_receipt_does_not_claim_approval(self):
+        import base64
+        self.verdict = json.dumps({"decision":"COMMENT", "summary":"待补充验证", "details":"已核对代码，缺少当前版本的运行产物以确认输出字段。"})
+        self.record.update(state="COMMENTED", body="待补充验证\n<!-- perry-relay-review state -->")
+        draft = {**self.record, "state":"PENDING", "body":""}
+        with patch.object(review,"KEY",b"key"), patch.object(review,"snapshot",return_value=self.pr), patch.object(review,"api",side_effect=[[],draft,draft,[],self.record,self.record,self.pr]) as api:
+            result = self.finish()
+            self.assertEqual(api.call_args_list[4].kwargs["write"]["event"], "COMMENT")
+        receipt = json.loads(base64.urlsafe_b64decode(result.split(" ",1)[1].split(".")[0]+"==="))
+        self.assertEqual(receipt["status"],"COMMENT")
+        self.assertEqual(receipt["review"],1)
+        self.assertIn("尚未批准",receipt["text"])
+        with patch.object(review,"KEY",b"key"), patch.object(review,"api",side_effect=[[self.record],self.record,self.pr]) as api:
+            self.finish()
+            self.assertFalse(any("write" in call.kwargs for call in api.call_args_list))
+        self.assertIsNone(review.received([self.record],"<!-- perry-relay-review state -->","head"))
+
+    def test_evidence_resolved_approval_discloses_static_limitation(self):
+        self.verdict = json.dumps({"decision":"APPROVE", "summary":"Verified", "details":"Reviewed source and targeted checks."})
+        self.record.update(state="APPROVED")
+        draft={**self.record,"state":"PENDING","body":""}
+        with patch.object(review,"KEY",b"key"), patch.object(review,"snapshot",return_value=self.pr), patch.object(review,"api",side_effect=[[],draft,draft,[],self.record,self.record,self.pr]) as api:
+            review.finish("owner/repo",1,"endpoint",self.pr,"state","ticket",self.verdict,self.db,
+                verified_standards={"ok":True,"base_head":["base","head"],"resolution":"evidence_review"})
+            self.assertIn("不代表静态检查器已完整通过",api.call_args_list[4].kwargs["write"]["body"])
+
     def test_tool_counts_come_from_host_history(self):
         import base64
         history = [{"name":"column_lookup","result":{"ok":True}}, {"name":"column_lookup","result":{"ok":False}}]

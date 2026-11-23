@@ -354,16 +354,21 @@ class AgentTools:
 
     def submit(self,target,head,decision,summary,details,standards=None):
         state=self.may_vote(target)
+        if decision not in ("APPROVE", "REQUEST_CHANGES", "COMMENT"):
+            raise ValueError("Choose APPROVE, REQUEST_CHANGES, or COMMENT with the specific remaining evidence gap.")
         if target not in self.packets: raise ValueError("Read the complete review context first.")
         pr,packet=self.packets[target]
         if head!=pr["head"]["sha"]: raise ValueError("The verdict must identify the reviewed commit.")
+        # A documented evidence gap must not consume the authorization or write
+        # identity used by a later final verdict on this same head.
+        if decision=="COMMENT": state += "-comment-" + head
         if decision=="APPROVE":
             checked=self.standards_check(target,standards)
             if not checked["ok"]:
                 return {"ok":False,"error":"Approval standards are not satisfied. Complete the mandatory checks; do not override failed checks with a narrative verdict.","standards":checked}
         if "file_manifest" in packet:
             missing=self.materials.missing(target)
-            required=[m for m in missing if decision=="APPROVE" or m.get("material")]
+            required=[] if decision=="COMMENT" else [m for m in missing if decision=="APPROVE" or m.get("material")]
             if required:
                 return {"ok":False,"error":"Review evidence is incomplete. Continue reading the listed material; this is not a repository permission failure.",
                         "missing_count":len(required),"missing":required[:30]}
@@ -387,8 +392,9 @@ class AgentTools:
         value=json.loads(base64.urlsafe_b64decode(body+"==="))
         if value["review"]:
             self.receipts.append(signed)
-            self.tasks.complete(target,state,{"review":value["review"],"sha":value["sha"],"state":value["status"],
-                                "url":"https://github.com/"+target+"#pullrequestreview-"+str(value["review"])})
+            if decision!="COMMENT":
+                self.tasks.complete(target,state,{"review":value["review"],"sha":value["sha"],"state":value["status"],
+                                    "url":"https://github.com/"+target+"#pullrequestreview-"+str(value["review"])})
         return value
 
     def local(self,command,action="shell"):
