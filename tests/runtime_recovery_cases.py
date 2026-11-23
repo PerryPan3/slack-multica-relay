@@ -286,6 +286,67 @@ time.sleep(60)
             self.assertLess(time.monotonic()-started,3)
             self.assert_child_stopped(root)
 
+    def test_cleanup_of_retained_zombie_group_does_not_fail_or_signal_its_owner(self):
+        # Keep an exited child unreaped so Darwin's zombie-only group race is
+        # deterministic. The controller belongs to a different process group.
+        code="""import subprocess,sys,time
+p=subprocess.Popen([sys.executable,'-c','pass'],start_new_session=True)
+for _ in range(200):
+ state=subprocess.run(['/bin/ps','-p',str(p.pid),'-o','stat='],capture_output=True,text=True).stdout.strip()
+ if state.startswith('Z'):break
+ time.sleep(.01)
+print(str(p.pid)+' '+state,flush=True)
+sys.stdin.readline()
+p.wait()
+"""
+        controller=subprocess.Popen([sys.executable,'-c',code],stdin=subprocess.PIPE,stdout=subprocess.PIPE,
+                                    text=True,start_new_session=True)
+        try:
+            pid,state=controller.stdout.readline().strip().split()
+            self.assertTrue(state.startswith('Z'))
+            target=SimpleNamespace(pid=int(pid),poll=lambda:0,wait=lambda **kwargs:0)
+            runtime.stop_process_group(target)
+            self.assertIsNone(controller.poll())
+        finally:
+            controller.communicate('done\n',timeout=5)
+
+    def test_permission_errors_are_ignored_only_after_verified_group_exit(self):
+        process=SimpleNamespace(pid=123,poll=Mock(return_value=0))
+        for listing in ('123 Z\n456 S\n','456 S\n'):
+            with patch.object(runtime.os,'killpg',side_effect=PermissionError(1,'denied')), \
+                    patch.object(runtime.subprocess,'run',return_value=SimpleNamespace(stdout=listing)):
+                runtime.signal_model_group(process,signal.SIGKILL)
+        for listing in ('123 S\n456 Z\n','123 Z\n123 R\n','invalid output',''):
+            with patch.object(runtime.os,'killpg',side_effect=PermissionError(1,'denied')), \
+                    patch.object(runtime.subprocess,'run',return_value=SimpleNamespace(stdout=listing)):
+                with self.assertRaises(PermissionError):runtime.signal_model_group(process,signal.SIGKILL)
+        for error in (OSError('ps unavailable'),subprocess.TimeoutExpired('ps',2),subprocess.CalledProcessError(1,'ps')):
+            with patch.object(runtime.os,'killpg',side_effect=PermissionError(1,'denied')), \
+                    patch.object(runtime.subprocess,'run',side_effect=error):
+                with self.assertRaises(PermissionError):runtime.signal_model_group(process,signal.SIGKILL)
+        process.poll.return_value=None
+        with patch.object(runtime.os,'killpg',side_effect=PermissionError(1,'denied')), \
+                patch.object(runtime.subprocess,'run') as inspect:
+            with self.assertRaises(PermissionError):runtime.signal_model_group(process,signal.SIGKILL)
+            inspect.assert_not_called()
+
+    def test_cleanup_still_kills_a_child_that_ignores_term_after_parent_exits(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder)
+            child="import signal,time;signal.signal(signal.SIGTERM,signal.SIG_IGN);print('ready',flush=True);time.sleep(60)"
+            parent="import subprocess,sys,time,pathlib;p=subprocess.Popen([sys.executable,'-c',CHILD],stdout=subprocess.PIPE,text=True);p.stdout.readline();pathlib.Path('child.pid').write_text(str(p.pid));print('ready',flush=True);time.sleep(60)".replace('CHILD',repr(child))
+            process=subprocess.Popen([sys.executable,'-c',parent],cwd=root,stdout=subprocess.PIPE,text=True,start_new_session=True)
+            try:
+                process.stdout.readline()
+                runtime.stop_process_group(process)
+                self.assertIsNotNone(process.returncode)
+                self.assert_child_stopped(root)
+            finally:
+                try:os.killpg(process.pid,signal.SIGKILL)
+                except (ProcessLookupError,PermissionError):pass
+                process.wait()
+                process.stdout.close()
+
     def test_timeout_terminates_descendants_without_claiming_completion(self):
         with tempfile.TemporaryDirectory() as folder:
             root=Path(folder);command=self.model(root,False)

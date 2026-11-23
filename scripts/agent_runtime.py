@@ -142,14 +142,37 @@ def interruption_handlers():
         for signum,handler in previous.items(): signal.signal(signum,handler)
 
 
+def group_has_live_members(group):
+    try:
+        listing=subprocess.run(['/bin/ps','-axo','pgid=,stat='],capture_output=True,
+                               text=True,check=True,timeout=2).stdout
+        if not listing.strip(): return None
+        for line in listing.splitlines():
+            fields=line.split()
+            if not fields: continue
+            if len(fields)!=2: return None
+            if int(fields[0])==group and not fields[1].startswith('Z'): return True
+        return False
+    except (OSError,ValueError,subprocess.SubprocessError):
+        return None
+
+
+def signal_model_group(process,signum):
+    try: os.killpg(process.pid,signum)
+    except ProcessLookupError: pass
+    except PermissionError:
+        # Darwin can return EPERM for a group containing only zombies. Confirm
+        # both parent exit and no live group members before treating it as done.
+        if process.poll() is None or group_has_live_members(process.pid) is not False:
+            raise
+
+
 def stop_process_group(process):
     # Descendants can retain MCP connections even after the CLI parent exits.
-    try: os.killpg(process.pid,signal.SIGTERM)
-    except ProcessLookupError: pass
+    signal_model_group(process,signal.SIGTERM)
     try: process.wait(timeout=1)
     except subprocess.TimeoutExpired: pass
-    try: os.killpg(process.pid,signal.SIGKILL)
-    except ProcessLookupError: pass
+    signal_model_group(process,signal.SIGKILL)
     process.wait()
 
 
