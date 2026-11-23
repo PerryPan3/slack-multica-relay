@@ -204,6 +204,32 @@ class NativeToolsTests(unittest.TestCase):
             self.assertEqual(result["review"],42)
             self.assertEqual(agent.tasks.complete.call_args.args[:2],(target,"stable-task"))
 
+    def test_comment_keeps_authorization_and_later_approval_uses_original_identity(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        import base64,json
+        target="team/repo/pull/696"
+        pr={"head":{"sha":"head"},"base":{"sha":"base"}}
+        agent=AgentTools.__new__(AgentTools)
+        agent.args={"ticket":"follow-up-ticket"};agent.review_plan={target:"stable-task"}
+        agent.tasks=SimpleNamespace(require=Mock(return_value="stable-task"),complete=Mock())
+        agent.packets={target:(pr,{"file_manifest":[]})};agent.receipts=[]
+        agent.materials=SimpleNamespace(missing=Mock(return_value=[{"material":"unavailable evidence"}]))
+        agent.standards=SimpleNamespace(evaluate=Mock(return_value={"ok":True,"base_head":["base","head"]}))
+        def response(*args,**kwargs):
+            decision=json.loads(args[6])["decision"]
+            body=base64.urlsafe_b64encode(json.dumps({"review":42,"sha":"head","status":decision}).encode()).decode()
+            return "relay-review/2 "+body+".signature"
+        with tempfile.TemporaryDirectory() as temp:
+            agent.review=SimpleNamespace(ROOT=Path(temp),snapshot=Mock(return_value=pr),revision=lambda p:[p["base"]["sha"],p["head"]["sha"]],require_revision=Mock(),finish=Mock(side_effect=response))
+            agent.submit(target,"head","COMMENT","Evidence gap","Need current compiled output")
+            self.assertEqual(agent.review.finish.call_args.args[4],"stable-task-comment-head")
+            agent.tasks.complete.assert_not_called()
+            agent.materials.missing.return_value=[]
+            agent.submit(target,"head","APPROVE","Verified","Evidence now checked")
+            self.assertEqual(agent.review.finish.call_args.args[4],"stable-task")
+            self.assertEqual(agent.tasks.complete.call_args.args[:2],(target,"stable-task"))
+
     def test_reconcile_accepted_review_after_process_interruption(self):
         from types import SimpleNamespace
         from unittest.mock import Mock

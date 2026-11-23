@@ -102,12 +102,30 @@ class ReviewStandards:
                 result = checker.check_change(*snapshots, changed)
                 state.update({k: result[k] for k in ("status", "findings", "models", "existing_findings")})
                 state["manual_rules"] = {**state["manual_rules"], **result["manual_rules"]}
+                # Only a trusted checker can classify a limitation as resolvable.
+                # Missing inputs, parser failures and confirmed violations stay blocking.
+                for finding in state["findings"]:
+                    if self.resolvable(finding):
+                        ident = "static_resolution:" + hashlib.sha256(
+                            json.dumps(finding, sort_keys=True).encode()).hexdigest()[:16]
+                        finding["resolution_rule"] = ident
+                        state["manual_rules"][ident] = {
+                            "instruction": "Resolve this tool limitation with a concrete code review and any necessary compiled, CI or data evidence. Explain what the tool could not check and how the evidence establishes the actual rule. Cite pinned-head rules, the affected implementation and relevant schema/macros. Do not claim unperformed checks or waive an explicit repository requirement.",
+                            "paths": [finding["path"]], "limitation": finding["detail"]}
             else:
                 state["status"] = "pass"
         except Exception as error:
             state["status"] = "incomplete"
             state["error"] = f"{type(error).__name__}: {str(error)[:500]}"
         return self.public(state)
+
+    @staticmethod
+    def resolvable(finding):
+        return (isinstance(finding, dict) and finding.get("incomplete") is True
+                and finding.get("code") == "unsupported_template"
+                and finding.get("rule") == "static-analysis"
+                and isinstance(finding.get("path"), str) and bool(finding["path"])
+                and isinstance(finding.get("detail"), str))
 
     @staticmethod
     def public(state):
@@ -124,8 +142,12 @@ class ReviewStandards:
                 errors.append("Standards policy changed; reread review_context")
         except OSError:
             errors.append("Standards policy is unavailable")
-        if state["status"] != "pass":
-            errors.append("Static standards check failed or is incomplete")
+        resolvable = (state["status"] == "incomplete" and not state.get("error")
+                      and bool(state["findings"])
+                      and all(self.resolvable(f) and f.get("resolution_rule") in state["manual_rules"]
+                              for f in state["findings"]))
+        if state["status"] != "pass" and not resolvable:
+            errors.append("Static check found a violation or an unresolved input/checker failure")
         entries = assessments if isinstance(assessments, list) else []
         by_id = {}
         rule_paths = {d["path"] for d in state["documents"]}
@@ -140,6 +162,8 @@ class ReviewStandards:
             by_id[ident] = item
             if item.get("status") not in ("pass", "not_applicable"):
                 errors.append(f"{ident}: unresolved or failed")
+            if ident.startswith("static_resolution:") and item.get("status") != "pass":
+                errors.append(f"{ident}: the tool limitation needs an affirmative evidence-based resolution")
             if not isinstance(item.get("reason"), str) or len(item["reason"].strip()) < 20:
                 errors.append(f"{ident}: explain the actual check or why it is inapplicable")
             references = item.get("evidence", [])
@@ -168,6 +192,7 @@ class ReviewStandards:
             if ident not in by_id:
                 errors.append(f"Missing mandatory assessment: {ident}")
         return {"ok": not errors, "errors": errors, "static_status": state["status"],
+                "resolution": "evidence_review" if resolvable and not errors else None,
                 "findings": state["findings"], "required_rules": state["manual_rules"],
                 "base_head": revision, "policy_digest": state["policy_digest"],
                 "checker_digest": state["checker_digest"]}

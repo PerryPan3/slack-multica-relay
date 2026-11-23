@@ -418,6 +418,20 @@ class GatewayRecoveryTests(unittest.TestCase):
         self.assertNotIn('another-secret',value['error'])
         self.assertNotIn('xoxp-token-secret',value['error'])
 
+    def test_review_tool_schema_requires_complete_assessments_before_publication(self):
+        from mcp.server.mcpserver.exceptions import ToolError
+        operations=SimpleNamespace(claim={},submit=Mock(return_value={'ok':True}))
+        args={'target':'team/repo/pull/1','head':'abc','decision':'APPROVE','summary':'s','details':'d',
+              'standards':[{'rule_id':'project_rules'}]}
+        with self.assertRaisesRegex(ToolError, 'Field required'):
+            self.call(operations,'submit_review',args)
+        operations.submit.assert_not_called()
+        args['standards'][0].update(status='pass',reason='Checked the applicable rule against the pinned source',
+                                   evidence=[{'path':'CLAUDE.md','quote':'A real source quotation'}])
+        result=self.call(operations,'submit_review',args)
+        self.assertFalse(result.get('isError',False))
+        operations.submit.assert_called_once()
+
     def test_gateway_stops_after_setup_exception(self):
         operations=SimpleNamespace(claim={})
         with tempfile.TemporaryDirectory() as folder:
