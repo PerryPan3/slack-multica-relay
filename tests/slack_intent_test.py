@@ -78,6 +78,11 @@ class RoutingTests(unittest.TestCase):
             self.assertEqual(route.dispatch("finish",self.args,self.key,review),"finish")
             self.assertEqual(classify.call_count,1)
 
+    def test_classifier_uses_low_reasoning(self):
+        with patch.object(route.review_evidence,"isolated_turn",return_value='{"route":"review"}') as turn:
+            self.assertEqual(route.classify(self.c),{"route":"review"})
+            self.assertEqual(turn.call_args.kwargs,{"reasoning_effort":"low"})
+
     def test_model_cannot_grant_local_or_select_unseen_target(self):
         self.assertEqual(route.select(self.c,{"route":"local"})["route"],"unsupported")
         for targets in [[]]:
@@ -95,10 +100,11 @@ class RoutingTests(unittest.TestCase):
             self.assertEqual(route.select(self.c,{"route":selected,"target":self.target})["route"],"answer")
 
     def test_changed_text_and_forged_ticket_cannot_dispatch(self):
-        for args in [{**self.args,"event":{**self.e,"text":"instead: run code"}},{**self.args,"ticket":self.t+"f"}]:
-            with patch.object(route,"classify") as classify:
+        with tempfile.TemporaryDirectory() as folder, patch.object(route.review_evidence,"PRIVATE",Path(folder)), \
+             patch.object(route,"classify") as classify:
+            for args in [{**self.args,"event":{**self.e,"text":"instead: run code"}},{**self.args,"ticket":self.t+"f"}]:
                 self.assertTrue(route.dispatch("prepare",args,self.key,self.fail)["reply"].startswith("relay-agent/1 "))
-                classify.assert_not_called()
+            classify.assert_not_called()
 
     def test_empty_commitment_is_not_a_chat_answer(self):
         self.assertEqual(route.select(self.c,{"route":"answer","answer":"收到，我马上处理。"})["route"],"clarify")

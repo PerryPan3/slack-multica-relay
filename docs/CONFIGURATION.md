@@ -16,7 +16,9 @@ checker 必须是私有 review 目录内经过核验的代码副本。它以固�
 checker 摘要缺失时，检查保持未完成，不能 Approve。
 
 `review_context` 将规范正文、静态检查结果和必检项一起纳入阅读覆盖记录。
-`review_standards` 可以在不投票的情况下验证审批条件，也适用于已合并 PR 的复盘。
+`review_standards` 用于验证 APPROVE 条件，也适用于已合并 PR 的复盘。
+决定 REQUEST_CHANGES 或 COMMENT 时，跳过此检查，并省略 `submit_review` 的 `standards` 参数。
+`submit_review` 的 `summary` 最多 1,000 字符，`details` 最多 20,000 字符。
 每个必检项需要 `rule_id`、`status`、具体 `reason` 和 `evidence: [{path, quote}]`，
 引用必须匹配当前 head 的规范和实现原文；有逐文件要求时必须覆盖所有指定文件。
 模型可以报告失败，不能用人工结论覆盖已确认的违规。可信 checker 可以把明确不支持的模板标为 `rule=static-analysis`、`incomplete=true`、`code=unsupported_template`；宿主为每条限制生成 `static_resolution:*` 必检项。Agent 必须逐项给出通过的具体判断，并引用当前 head 的规则与受影响实现，结合必要的宏、字段登记、编译、CI 或数据证据解释如何完成原检查。`not_applicable` 不能解除该限制。普通解析错误、缺失输入、摘要不符及未知异常不能走此路径；任何确定违规仍阻止 Approve。静态状态仍保留 incomplete，成功审批会披露补充审查，并不声称静态工具已通过。`submit_review` 重新检查这些

@@ -2,6 +2,7 @@ import json
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import review_evidence as evidence
@@ -34,6 +35,26 @@ class EvidenceTests(unittest.TestCase):
             ],
         }
     )
+
+    def test_isolated_reasoning_override_preserves_cli_and_environment_isolation(self):
+        process=Mock(returncode=0,pid=4321,communicate=Mock(return_value=('verdict','')))
+        with patch.object(evidence,'PRIVATE',Path('/unused/runtime')), \
+             patch('network_recovery.enabled',return_value=False), \
+             patch.object(evidence.subprocess,'Popen',return_value=process) as spawn, \
+             patch.object(evidence.os,'killpg'):
+            self.assertEqual(evidence.isolated_turn('classify',{},reasoning_effort='low'),'verdict')
+            self.assertEqual(spawn.call_args.args[0],[
+                '/unused/runtime/bin/codex','exec','--ephemeral','--skip-git-repo-check','--color','never',
+                '-c','model_reasoning_effort="low"','-',
+            ])
+            self.assertEqual(spawn.call_args.kwargs['env'],{'CODEX_HOME':'/unused/runtime/model-home'})
+            self.assertTrue(spawn.call_args.kwargs['start_new_session'])
+            evidence.isolated_turn('review',{})
+            self.assertNotIn('-c',spawn.call_args.args[0])
+            spawn.reset_mock()
+            with self.assertRaisesRegex(ValueError,'Unsupported reasoning effort'):
+                evidence.isolated_turn('classify',{},reasoning_effort='invalid')
+            spawn.assert_not_called()
 
     def test_decodes_both_sdk_result_shapes_and_rejects_missing_status(self):
         from types import SimpleNamespace

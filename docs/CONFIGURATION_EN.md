@@ -17,8 +17,10 @@ Missing configuration, dependencies, documents, complete trees or a matching
 checker digest leaves the check incomplete and prevents approval.
 
 `review_context` includes rule documents, static findings and mandatory assessments
-in material coverage. `review_standards` checks readiness without voting, including
-closed-PR retrospectives. Each assessment supplies `rule_id`, `status`, a concrete
+in material coverage. `review_standards` checks APPROVE readiness without voting, including
+closed-PR retrospectives. For REQUEST_CHANGES or COMMENT, skip this check and omit
+the `standards` argument to `submit_review`. The review summary and details have
+limits of 1,000 and 20,000 characters, respectively. Each assessment supplies `rule_id`, `status`, a concrete
 `reason` and `evidence: [{path, quote}]` matching pinned-head rules and implementation.
 Per-file requirements must cite every specified file. Manual statements cannot override confirmed violations. A trusted checker may mark a known template limitation with `rule=static-analysis`, `incomplete=true`, and `code=unsupported_template`. The host creates a mandatory `static_resolution:*` assessment for each limitation. Each must affirmatively explain how pinned-head rules and implementation, plus necessary macro, schema, compiled, CI or data evidence, establish the original check. `not_applicable` cannot resolve it. Ordinary parse errors, missing inputs, digest mismatches and unknown exceptions remain blocking, as do confirmed violations. Static status remains incomplete and the published approval discloses the evidence-based review. `submit_review` rechecks these conditions and the revision;
 the legacy publication entry also rejects approval without host verification.

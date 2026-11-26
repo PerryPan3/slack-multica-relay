@@ -187,6 +187,8 @@ class ProcessRecoveryTests(unittest.TestCase):
             config=runtime.tomllib.loads((home/'config.toml').read_text())
             self.assertEqual(config['model'],'gpt-6-astra')
             self.assertEqual(config['service_tier'],'default')
+            self.assertEqual(config['agents'],{'enabled':False})
+            self.assertNotIn('multi_agent',config['features'])
 
     def test_new_request_and_resumed_thread_receive_the_current_profile(self):
         from contextlib import contextmanager
@@ -403,7 +405,7 @@ class GatewayRecoveryTests(unittest.TestCase):
         encoded='iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aYioAAAAASUVORK5CYII='
         image={'ok':True,'path':'flowGraphImage.png','image':{'mimeType':'image/png','data':encoded}}
         plain={'ok':True,'text':'query source','next_offset':None}
-        operations=SimpleNamespace(claim={},artifact=Mock(side_effect=[image,plain]))
+        operations=SimpleNamespace(claim={},artifact=Mock(side_effect=[image,plain]),aclose=AsyncMock())
         async def read(port,nonce):
             async with create_mcp_http_client(headers={'Authorization':'Bearer '+nonce}) as http:
                 async with streamable_http_client(f'http://127.0.0.1:{port}/mcp',http_client=http) as streams:
@@ -425,6 +427,7 @@ class GatewayRecoveryTests(unittest.TestCase):
         self.assertEqual(len(text.content),1)
         self.assertIsInstance(text.content[0],TextContent)
         self.assertEqual(json.loads(text.content[0].text),plain)
+        operations.aclose.assert_awaited_once()
 
     def test_initialization_failure_persists_interruption_and_replays_signed_reply(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -494,7 +497,7 @@ class GatewayRecoveryTests(unittest.TestCase):
         operations.submit.assert_called_once()
 
     def test_gateway_stops_after_setup_exception(self):
-        operations=SimpleNamespace(claim={})
+        operations=SimpleNamespace(claim={},aclose=AsyncMock())
         with tempfile.TemporaryDirectory() as folder:
             with self.assertRaisesRegex(RuntimeError,'setup failure'):
                 with runtime.running_gateway(operations,Path(folder)/'audit') as (port,_):
@@ -503,6 +506,26 @@ class GatewayRecoveryTests(unittest.TestCase):
             connection=socket.socket();connection.settimeout(.2)
             try:self.assertNotEqual(connection.connect_ex(('127.0.0.1',port)),0)
             finally:connection.close()
+        operations.aclose.assert_awaited_once()
+
+    def test_gateway_runs_fallback_cleanup_on_its_event_loop(self):
+        loops=[]
+        async def serve(server,sockets):
+            loops.append(asyncio.get_running_loop())
+            server.started=True
+            while not server.should_exit:
+                await asyncio.sleep(.01)
+
+        async def close():
+            loops.append(asyncio.get_running_loop())
+
+        operations=SimpleNamespace(claim={},aclose=AsyncMock(side_effect=close))
+        with tempfile.TemporaryDirectory() as folder, patch.object(runtime.uvicorn.Server,'serve',serve):
+            with runtime.running_gateway(operations,Path(folder)/'audit'):
+                pass
+        operations.aclose.assert_awaited_once()
+        self.assertEqual(len(loops),2)
+        self.assertIs(loops[0],loops[1])
 
 
 if __name__=='__main__':unittest.main()

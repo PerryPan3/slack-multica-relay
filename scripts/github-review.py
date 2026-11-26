@@ -18,6 +18,8 @@ GH = "/opt/homebrew/bin/gh"
 LOGIN = None
 KEY = None
 GH_CALLS = 0
+SUMMARY_MAX_CHARS = 1000
+DETAILS_MAX_CHARS = 20000
 
 
 class Stop(Exception):
@@ -259,15 +261,34 @@ def finding_text(value):
                      if not _DELIVERY_DISCLAIMER.fullmatch(line.strip())).strip()
 
 
+def validate_verdict_fields(summary, details):
+    for field, value, limit, instruction in (
+        ("summary", summary, SUMMARY_MAX_CHARS, "请填写简短中文审查结论"),
+        ("details", details, DETAILS_MAX_CHARS, "请填写具体中文审查依据"),
+    ):
+        actual = len(value) if isinstance(value, str) else 0
+        if not isinstance(value, str) or not value.strip():
+            reason = "empty"
+            error = f"{field} 不能为空（当前 {actual} 字符，上限 {limit} 字符），{instruction}。"
+        elif actual > limit:
+            reason = "too_long"
+            error = f"{field} 超过 {limit} 字符上限（当前 {actual} 字符），请精简后重试。"
+        else:
+            continue
+        return {"field": field, "reason": reason, "actual_chars": actual,
+                "max_chars": limit, "error": error}
+    return None
+
+
 def finish(repo, number, endpoint, pr, state, ticket, output, db, history=(), policy=None, prior_calls=0, mode="review", verified_standards=None):
     row = db.execute("select base,head,started,attempting from jobs where id=?", (state,)).fetchone()
     if not row:
         raise Stop("找不到本次审查读取代码的记录。")
     require_revision(row[:2], pr)
     verdict = json.loads(output.strip().removeprefix("```json").removesuffix("```").strip())
-    decision, summary, details = (verdict[k] for k in ("decision","summary","details"))
-    if not all(isinstance(x,str) and x.strip() for x in (summary,details)) or len(summary)>500 or len(details)>2500:
-        raise Stop("审查结果不完整，未提交 GitHub。")
+    decision, summary, details = (verdict.get(k) for k in ("decision","summary","details"))
+    if error := validate_verdict_fields(summary, details):
+        raise Stop(error["error"])
     if mode == "inspect":
         text = f"只读复核 · {repo.split('/')[-1]} #{number} · {row[1][:8]}"
         return signed_result(repo,number,pr,ticket,text+"\n\n"+summary+"\n\n"+details,row[2],"INSPECTED",

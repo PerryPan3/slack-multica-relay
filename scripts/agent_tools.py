@@ -1,6 +1,7 @@
 """Request-bound tools for the native Slack agent. Credentials stay in the host."""
 import asyncio
-from contextlib import closing
+from concurrent.futures import Future
+from contextlib import AsyncExitStack, closing
 import base64
 import hashlib
 import importlib.util
@@ -8,6 +9,7 @@ import json
 import os
 import re
 import sqlite3
+import threading
 import time
 import tomllib
 import httpx2
@@ -24,6 +26,10 @@ READ_NAME = re.compile(r"^(?:[a-z]+_)*(?:get|list|search|describe|read|fetch|que
 WRITE_NAME = re.compile(r"(?:^|_)(?:create|update|delete|remove|insert|put|post|set|start|stop|trigger|run|restart|cancel|submit|upload|send|execute|grant|revoke|rotate|write|mark|transition|assign)(?:_|$)")
 SQL_TOOLS = {"execute_query", "query", "run_query", "execute_sql", "redshift_query", "clickhouse_query"}
 SQL_FIELDS = ("sql", "query", "sql_query", "statement")
+IMMUTABLE_GIT_OBJECT = re.compile(
+    r"repos/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/git/"
+    r"(?:trees/[a-fA-F0-9]{40}\?recursive=1|blobs/[a-fA-F0-9]{40})"
+)
 
 
 def readonly_sql(value, dialect="redshift"):
@@ -55,6 +61,19 @@ def allowed_tool(tool):
     return bool(READ_NAME.search(tool["name"]) or (tool.get("annotations") or {}).get("readOnlyHint") is True)
 
 
+class _StdioWorker:
+    def __init__(self):
+        self.queue = asyncio.Queue()
+        self.active = None
+        self.ready = False
+        self.closing = False
+        self.task = None
+
+    def cancel(self):
+        if not self.closing and not self.task.done() and not self.task.cancelling():
+            self.task.cancel()
+
+
 class AgentTools:
     def __init__(self,args,key,root):
         self.args=args
@@ -63,6 +82,11 @@ class AgentTools:
         self.claim=slack_intent.verified(args,key)
         self.connections=tomllib.loads((Path.home()/".codex/config.toml").read_text()).get("mcp_servers",{})
         self.catalog={}
+        self._stdio_workers={}
+        self._stdio_tasks=set()
+        self._closed=False
+        self._git_objects={}
+        self._git_objects_lock=threading.Lock()
         self.results={}
         self.counts={}
         self.receipts=[]
@@ -75,7 +99,7 @@ class AgentTools:
         self.review.KEY=key
         self.review.LOGIN=config["login"]
         self.review.GH=config["gh"]
-        self.materials=ReviewMaterials(self.review.api)
+        self.materials=ReviewMaterials(self.git_object)
 
     def record(self,label,ok=True):
         value=self.counts.setdefault(label,{"name":label,"count":0,"failed":0})
@@ -86,36 +110,72 @@ class AgentTools:
         return [name for name,c in self.connections.items() if c.get("enabled",True)
                 and not any(word in name.lower() for word in ("chrome","browser","node_repl","computer"))]
 
-    async def upstream(self,server,method,tool=None,arguments=None):
-        from mcp import ClientSession, StdioServerParameters
+    async def session_request(self,session,server,method,tool,arguments):
+        if method=="list":
+            from mcp import types
+            result=(await session.list_tools()).model_dump(mode="json",by_alias=True)
+            found=list(result["tools"])
+            while result.get("nextCursor"):
+                result=(await session.list_tools(params=types.PaginatedRequestParams(cursor=result["nextCursor"]))).model_dump(mode="json",by_alias=True)
+                found.extend(result["tools"])
+            allowed={item["name"]:item for item in found if allowed_tool(item)}
+            self.catalog[server]=allowed
+            return [{"name":item["name"],"description":item.get("description"),"parameters":item["inputSchema"]} for item in allowed.values()]
+        result=await session.call_tool(tool,arguments)
+        value=result.model_dump(mode="json",by_alias=True,exclude_none=True)
+        if value.get("isError"):
+            return {"ok":False,"error":str(value.get("content",[]))[:6000]}
+        raw=json.dumps(value,ensure_ascii=False)
+        if len(raw.encode())>80000:
+            return self.paged_result(raw)
+        return {"ok":True,"result":value}
+
+    async def serve_stdio(self,server,params,worker):
+        from mcp import ClientSession
         from mcp.client.stdio import stdio_client
-        from mcp.client.streamable_http import streamable_http_client
-        if server not in self.services():
-            raise ValueError("This service is not available for this request.")
-        if not (self.claim.get("business") or self.claim.get("review") or self.claim.get("local")):
-            raise ValueError("This request has no read-tool capability.")
-        cfg=self.connections[server]
-        async def run(session):
-            await session.initialize()
-            if method=="list":
-                result=(await session.list_tools()).model_dump(mode="json",by_alias=True)
-                found=list(result["tools"])
-                while result.get("nextCursor"):
-                    from mcp import types
-                    result=(await session.list_tools(params=types.PaginatedRequestParams(cursor=result["nextCursor"]))).model_dump(mode="json",by_alias=True)
-                    found.extend(result["tools"])
-                allowed={item["name"]:item for item in found if allowed_tool(item)}
-                self.catalog[server]=allowed
-                return [{"name":item["name"],"description":item.get("description"),"parameters":item["inputSchema"]} for item in allowed.values()]
-            result=await session.call_tool(tool,arguments)
-            value=result.model_dump(mode="json",by_alias=True,exclude_none=True)
-            if value.get("isError"):
-                return {"ok":False,"error":str(value.get("content",[]))[:6000]}
-            raw=json.dumps(value,ensure_ascii=False)
-            if len(raw.encode())>80000:
-                return self.paged_result(raw)
-            return {"ok":True,"result":value}
-        if "command" in cfg:
+        # AnyIO requires the task that opens these contexts to close them.
+        with open(os.devnull,"w") as quiet:
+            async with AsyncExitStack() as stack:
+                try:
+                    reader,writer=await stack.enter_async_context(stdio_client(params,errlog=quiet))
+                    session=await stack.enter_async_context(ClientSession(reader,writer))
+                    await session.initialize()
+                    worker.ready=True
+                    while (request := await worker.queue.get()) is not None:
+                        method,tool,arguments,future=request
+                        if future.done():
+                            continue
+                        worker.active=future
+                        value=await self.session_request(session,server,method,tool,arguments)
+                        if not future.done():
+                            future.set_result(value)
+                        worker.active=None
+                finally:
+                    worker.closing=True
+                    if self._stdio_workers.get(server) is worker:
+                        del self._stdio_workers[server]
+                        self.catalog.pop(server,None)
+
+    def retire_stdio(self,server,worker,task):
+        if hasattr(self,"_stdio_tasks"):
+            self._stdio_tasks.discard(task)
+        if self._stdio_workers.get(server) is worker:
+            del self._stdio_workers[server]
+            self.catalog.pop(server,None)
+        error=None if task.cancelled() else task.exception()
+        error=error or ConnectionError("MCP stdio session closed.")
+        if worker.active is not None and not worker.active.done():
+            worker.active.set_exception(error)
+        while not worker.queue.empty():
+            request=worker.queue.get_nowait()
+            if request is not None and not request[3].done():
+                request[3].set_exception(error)
+
+    async def stdio_request(self,server,cfg,method,tool,arguments):
+        from mcp import StdioServerParameters
+
+        worker=self._stdio_workers.get(server)
+        if worker is None or worker.closing or (worker.task is not None and worker.task.done()):
             env={k:os.environ[k] for k in cfg.get("env_vars",[]) if k in os.environ}
             env.update(cfg.get("env",{}))
             env["HOME"]=str(Path.home())
@@ -127,15 +187,58 @@ class AgentTools:
                 env["PATH"]=os.pathsep.join(dict.fromkeys(p for p in paths if p))
             if "redshift" in server: env["REDSHIFT_ALLOW_WRITE"]="false"
             params=StdioServerParameters(command=cfg["command"],args=cfg.get("args",[]),cwd=cfg.get("cwd"),env=env)
-            with open(os.devnull,"w") as quiet:
-                async with stdio_client(params,errlog=quiet) as (reader,writer), ClientSession(reader,writer) as session:
-                    return await run(session)
+            worker=_StdioWorker()
+            self._stdio_workers[server]=worker
+            worker.task=asyncio.create_task(self.serve_stdio(server,params,worker))
+            if not hasattr(self,"_stdio_tasks"):
+                self._stdio_tasks=set()
+            self._stdio_tasks.add(worker.task)
+            worker.task.add_done_callback(lambda task:self.retire_stdio(server,worker,task))
+        future=asyncio.get_running_loop().create_future()
+        worker.queue.put_nowait((method,tool,arguments,future))
+        try:
+            return await future
+        except asyncio.CancelledError:
+            if worker.active is future or not worker.ready:
+                worker.cancel()
+                await asyncio.shield(asyncio.gather(worker.task,return_exceptions=True))
+            raise
+
+    async def aclose(self):
+        workers=list(self._stdio_workers.values())
+        tasks=set(getattr(self,"_stdio_tasks",()))
+        tasks.update(worker.task for worker in workers if worker.task is not None)
+        if not self._closed:
+            self._closed=True
+            for worker in workers:
+                if worker.closing:
+                    continue
+                if worker.ready and worker.active is None and worker.queue.empty():
+                    worker.queue.put_nowait(None)
+                else:
+                    worker.cancel()
+        if tasks:
+            await asyncio.shield(asyncio.gather(*tasks,return_exceptions=True))
+
+    async def upstream(self,server,method,tool=None,arguments=None):
+        from mcp import ClientSession
+        from mcp.client.streamable_http import streamable_http_client
+        if self._closed:
+            raise ConnectionError("This request's tool gateway has closed.")
+        if server not in self.services():
+            raise ValueError("This service is not available for this request.")
+        if not (self.claim.get("business") or self.claim.get("review") or self.claim.get("local")):
+            raise ValueError("This request has no read-tool capability.")
+        cfg=self.connections[server]
+        if "command" in cfg:
+            return await self.stdio_request(server,cfg,method,tool,arguments)
         headers=dict(cfg.get("http_headers",{}))
         headers.update({k:os.environ[v] for k,v in cfg.get("env_http_headers",{}).items() if v in os.environ})
         token=cfg.get("bearer_token_env_var")
         if token and token in os.environ: headers["Authorization"]="Bearer "+os.environ[token]
         async with httpx2.AsyncClient(headers=headers, timeout=120) as client, streamable_http_client(cfg["url"],http_client=client) as (reader,writer,_), ClientSession(reader,writer) as session:
-            return await run(session)
+            await session.initialize()
+            return await self.session_request(session,server,method,tool,arguments)
 
     async def discover(self,server):
         return await asyncio.wait_for(self.upstream(server,"list"),90)
@@ -161,7 +264,10 @@ class AgentTools:
 
     async def read(self,server,tool,arguments):
         if server not in self.catalog: await self.discover(server)
-        descriptor=self.catalog[server].get(tool)
+        tools=self.catalog.get(server)
+        if tools is None:
+            raise ConnectionError("MCP tool catalog was invalidated. Discover the service again.")
+        descriptor=tools.get(tool)
         if not descriptor: raise ValueError("This tool is not an approved read operation.")
         args=dict(arguments)
         props=descriptor["inputSchema"].get("properties",{})
@@ -201,17 +307,40 @@ class AgentTools:
             return {"path":result["path"],"sha":result["sha"],"content":base64.b64decode(result["content"]).decode("utf8",errors="replace")}
         return result
 
-    def knowledge(self,repo,ref='',paths=None,changed_paths=None,raw=False):
+    def git_object(self,path):
+        if not IMMUTABLE_GIT_OBJECT.fullmatch(path):
+            return self.review.api(path)
+        with self._git_objects_lock:
+            cached=self._git_objects.get(path)
+            if cached is None:
+                request=self._git_objects[path]=Future()
+        if cached is not None:
+            return cached.result()
+        cacheable=False
+        try:
+            result=self.review.api(path)
+            cacheable=isinstance(result,dict) and not result.get("truncated")
+            request.set_result(result)
+            return result
+        except BaseException as error:
+            request.set_exception(error)
+            raise
+        finally:
+            if not cacheable:
+                with self._git_objects_lock:
+                    del self._git_objects[path]
+
+    def knowledge(self,repo,ref='',paths=None,changed_paths=None,raw=False,exclude_blobs=None):
         if not hasattr(self,'repository_reader'):
             def read(path):
-                try:result=self.review.api(path)
+                try:result=self.git_object(path)
                 except Exception:
                     self.record('GitHub',False)
                     raise
                 self.record('GitHub')
                 return result
             self.repository_reader=RepositoryKnowledge(read)
-        result=self.repository_reader.read(repo,ref,paths,changed_paths)
+        result=self.repository_reader.read(repo,ref,paths,changed_paths,exclude_blobs=exclude_blobs)
         if raw:return result
         text=json.dumps(result,ensure_ascii=False)
         return self.paged_result(text) if len(text.encode())>24000 else result
@@ -238,15 +367,17 @@ class AgentTools:
         self.record("GitHub")
         if "file_manifest" in packet:
             if not hasattr(self, "standards"):
-                self.standards = ReviewStandards(self.review.api, self.review.ROOT)
+                self.standards = ReviewStandards(self.git_object, self.review.ROOT)
             packet["standards"] = self.standards.prepare(target, pr, packet)
+            exclude_blobs={d["path"]:d["blob"] for d in packet["standards"].get("documents",[])
+                           if d["side"]=="head"}
             try:
                 packet['repository_knowledge']=self.knowledge(repo,pr['head']['sha'],
-                    changed_paths=[f['filename'] for f in packet['file_manifest']],raw=True)
+                    changed_paths=[f['filename'] for f in packet['file_manifest']],raw=True,exclude_blobs=exclude_blobs)
             except Exception as error:
                 packet['repository_knowledge']={'repo':repo,'commit':pr['head']['sha'],
                     'error':str(error)[:600],'instruction':'Retry repository_knowledge or use github_read for project rules and relevant docs. This read failure does not revoke review permission.'}
-            if not hasattr(self,"materials"): self.materials=ReviewMaterials(self.review.api)
+            if not hasattr(self,"materials"): self.materials=ReviewMaterials(self.git_object)
             return self.materials.register(target,pr,packet)
         return packet
 
@@ -292,7 +423,7 @@ class AgentTools:
                     json.dumps({"current_request":self.claim["binding"][-1],"history":self.claim["history"],
                                 "candidates":candidates,"tasks":tasks,
                                 "previous_execution":getattr(self,'previous_execution',None)},ensure_ascii=False))
-            raw=review_evidence.isolated_turn(prompt,{}).strip()
+            raw=review_evidence.isolated_turn(prompt,{},reasoning_effort="low").strip()
             return json.loads(raw.removeprefix("```json").removesuffix("```").strip())
         self.review_plan=self.tasks.prepare(classify)
         return {"continue_to_verdict":list(self.review_plan),"tasks":self.tasks.summary(),
@@ -359,6 +490,8 @@ class AgentTools:
         if target not in self.packets: raise ValueError("Read the complete review context first.")
         pr,packet=self.packets[target]
         if head!=pr["head"]["sha"]: raise ValueError("The verdict must identify the reviewed commit.")
+        if error := self.review.validate_verdict_fields(summary,details):
+            return {"ok":False,**error}
         # A documented evidence gap must not consume the authorization or write
         # identity used by a later final verdict on this same head.
         if decision=="COMMENT": state += "-comment-" + head

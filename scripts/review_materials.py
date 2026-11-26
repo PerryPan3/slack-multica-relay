@@ -8,7 +8,7 @@ import struct
 import zipfile
 from urllib.parse import quote
 
-PAGE = 24000
+PAGE = 48000
 MAX_BLOB = 20 * 1024 * 1024
 MAX_EXPANDED = 64 * 1024 * 1024
 
@@ -25,7 +25,7 @@ class ReviewMaterials:
     def register(self, target, pr, packet):
         revision = (pr["base"]["sha"], pr["head"]["sha"])
         previous = self.reviews.get(target)
-        text = json.dumps(packet, ensure_ascii=False, indent=2)
+        text = json.dumps(packet, ensure_ascii=False, separators=(",", ":"))
         if previous and previous["revision"] == revision and previous["text"] == text:
             return self.page(target, 0)
         files = {f["filename"]:f for f in packet["file_manifest"]}

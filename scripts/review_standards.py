@@ -46,6 +46,7 @@ class ReviewStandards:
             snapshots = []
             trees = []
             blobs = {}
+            base_documents = {}
             def read_blob(path, row):
                 if row.get("mode") == "120000" or row.get("size", 1048577) > 1048576:
                     raise ValueError(f"Cannot safely read {path}")
@@ -88,8 +89,16 @@ class ReviewStandards:
                     if budget < 0:
                         raise ValueError("Standards evidence exceeds the bounded reader capacity")
                     if path in documents:
-                        state["documents"].append({"side": side, "path": path, "commit": sha,
-                                                   "blob": row["sha"], "text": files[path]})
+                        document = {"side": side, "path": path, "commit": sha,
+                                    "blob": row["sha"], "text": files[path]}
+                        key = (path, row["sha"])
+                        if side == "head" and key in base_documents:
+                            document.update(sides=["base", "head"], base_commit=revision[0])
+                            state["documents"][base_documents[key]] = document
+                        else:
+                            if side == "base":
+                                base_documents[key] = len(state["documents"])
+                            state["documents"].append(document)
                 snapshots.append(files)
             if checker:
                 selected = checker.affected_models(*snapshots, changed, set(trees[0]) | set(trees[1]))
