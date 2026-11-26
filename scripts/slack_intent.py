@@ -51,7 +51,7 @@ def classify(claim):
         "current":claim["binding"][-1],"same_thread":claim["history"],"context_partial":claim["partial"],
         "targets":claim["targets"],"additional_targets":claim["overflow"],
         "can_investigate":claim.get("business",False),"can_review":claim["review"],"can_run_local":claim["local"],
-    },ensure_ascii=False),{})
+    },ensure_ascii=False),{},reasoning_effort="low")
     return json.loads(raw.strip().removeprefix("```json").removesuffix("```").strip())
 
 

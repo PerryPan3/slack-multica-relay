@@ -37,6 +37,17 @@ class KnowledgeTests(unittest.TestCase):
         self.assertIn('Join at invoice grain.',[d['text'] for d in next_page['documents']])
         self.assertEqual(sum('/git/trees/' in c for c in calls),1)
 
+    def test_exact_exclusion_points_to_standards_without_fetching_blob(self):
+        reader,calls=self.fixture()
+        rule_sha=blob_digest(b'Read CLAUDE.md and docs/joins.md.')
+        result=reader.read('team/repo','a'*40,exclude_blobs={'AGENTS.md':rule_sha,'CLAUDE.md':'b'*40})
+        documents={d['path']:d for d in result['documents']}
+        self.assertEqual(documents['AGENTS.md'],
+                         {'path':'AGENTS.md','blob':rule_sha,'included_in':'standards.documents',
+                          'url':'https://github.com/team/repo/blob/'+'a'*40+'/AGENTS.md'})
+        self.assertNotIn(f'repos/team/repo/git/blobs/{rule_sha}',calls)
+        self.assertEqual(documents['CLAUDE.md']['text'],'Use the pinned commit.')
+
     def test_review_uses_exact_head_and_nested_override(self):
         reader,calls=self.fixture()
         result=reader.read('team/repo','b'*40,changed_paths=['models/sales/model.sql'])

@@ -10,7 +10,7 @@ class RepositoryKnowledge:
         self.api=api
         self.trees={}
 
-    def read(self,repo,ref='',paths=None,changed_paths=None):
+    def read(self,repo,ref='',paths=None,changed_paths=None,exclude_blobs:dict[str,str]|None=None):
         if not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+',repo):
             raise ValueError('Use owner/repository.')
         paths=paths or []
@@ -39,15 +39,19 @@ class RepositoryKnowledge:
         if 'README.md' in files:selected.append('README.md')
         selected=list(dict.fromkeys([*selected,*paths]))
         documents=[];errors=[];remaining=[];budget=256000
+        embedded_count=0
         for path in selected:
             row=files.get(path)
             if row is None:
                 errors.append({'path':path,'error':'Not found in this tree; a truncated tree cannot prove absence.' if tree.get('truncated') else 'Not present at this commit.'});continue
             if row.get('mode')=='120000':
                 errors.append({'path':path,'error':'Symbolic link; read its target explicitly.'});continue
-            if row.get('size',0)>min(budget,128000) or len(documents)>=20:
-                remaining.append(path);continue
             try:
+                document={'path':path,'blob':row['sha'],'url':f'https://github.com/{repo}/blob/{sha}/{quote(path,safe="/")}'}
+                if exclude_blobs and row['sha']==exclude_blobs.get(path):
+                    documents.append({**document,'included_in':'standards.documents'});continue
+                if row.get('size',0)>min(budget,128000) or embedded_count>=20:
+                    remaining.append(path);continue
                 blob=self.api(f'repos/{repo}/git/blobs/{row["sha"]}')
                 if blob.get('encoding')!='base64':raise ValueError('Expected a base64 text blob.')
                 raw=base64.b64decode(blob['content'],validate=False)
@@ -55,7 +59,8 @@ class RepositoryKnowledge:
                 if blob_digest(raw)!=row['sha']:raise ValueError('Blob content does not match the pinned file.')
                 if len(raw)>min(budget,128000):remaining.append(path);continue
                 text=raw.decode('utf8');budget-=len(raw)
-                documents.append({'path':path,'blob':row['sha'],'url':f'https://github.com/{repo}/blob/{sha}/{quote(path,safe="/")}', 'text':text})
+                documents.append({**document,'text':text})
+                embedded_count+=1
             except Exception as error:
                 errors.append({'path':path,'error':str(error)[:600]})
         candidates=sorted(p for p in files if p.endswith('.md') and (p.startswith(('docs/','.claude/','.agents/')) or p in selected))

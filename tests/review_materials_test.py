@@ -62,6 +62,15 @@ class MaterialTests(unittest.TestCase):
             page=reader.inspect(t,'flow.tfl',members=['flow'],offset=page['next_offset'])
         self.assertEqual(reader.missing(t),[])
 
+    def test_review_material_uses_compact_json_and_48000_character_pages(self):
+        reader,t,_,packet=self.setup_review(b'content',text='差异'*25000)
+        first=reader.page(t)
+        self.assertEqual(first['next_offset'],48000)
+        self.assertEqual(len(first['text']),48000)
+        last=reader.page(t,first['next_offset'])
+        self.assertIsNone(last['next_offset'])
+        self.assertEqual(first['text']+last['text'],json.dumps(packet,ensure_ascii=False,separators=(',',':')))
+
     def test_modified_archive_requires_both_pinned_versions_and_new_head_resets_reads(self):
         reader,t,pr,packet=self.setup_review(b'new',status='modified',old=b'old')
         reader.inspect(t,'flow.tfl')

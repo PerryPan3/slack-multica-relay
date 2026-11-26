@@ -30,10 +30,12 @@ class StandardsTests(unittest.TestCase):
 
     def api(self, path):
         if "/git/trees/" in path:
+            files = getattr(self, "base_files", self.files) if path.endswith("b" * 40 + "?recursive=1") else self.files
             return {"tree": [{"path": p, "sha": blob_digest(t.encode()), "size": len(t.encode()),
-                              "type": "blob", "mode": "100644"} for p, t in self.files.items()]}
+                              "type": "blob", "mode": "100644"} for p, t in files.items()]}
         sha = path.rsplit("/", 1)[-1]
-        text = next(t for t in self.files.values() if blob_digest(t.encode()) == sha)
+        text = next(t for t in (*self.files.values(), *getattr(self, "base_files", {}).values())
+                    if blob_digest(t.encode()) == sha)
         return {"encoding": "base64", "content": base64.b64encode(text.encode()).decode()}
 
     def assessments(self):
@@ -51,6 +53,29 @@ class StandardsTests(unittest.TestCase):
         entries[0]["evidence"] = [entries[0]["evidence"][1]]
         self.assertFalse(self.evaluate(entries)["ok"])
         self.assertTrue(self.evaluate(self.assessments())["ok"])
+
+    def test_identical_rule_text_is_embedded_once_for_both_commits(self):
+        result = self.gate.prepare(self.target, self.pr, self.packet)
+        rule = self.files["CLAUDE.md"]
+        self.assertEqual(result["documents"], [
+            {"side": "head", "sides": ["base", "head"], "path": "CLAUDE.md",
+             "base_commit": "b" * 40, "commit": "a" * 40, "blob": blob_digest(rule.encode()), "text": rule},
+        ])
+        self.assertTrue(self.evaluate(self.assessments())["ok"])
+
+    def test_changed_and_removed_rules_preserve_base_evidence(self):
+        old_rule = "Every changed function needs a migration note."
+        self.base_files = {**self.files, "CLAUDE.md": old_rule, "AGENTS.md": "Read the old instructions."}
+        result = self.gate.prepare(self.target, self.pr, self.packet)
+        docs = {(d["path"], d["side"]): d for d in result["documents"]}
+        self.assertEqual(set(docs), {("CLAUDE.md", "base"), ("CLAUDE.md", "head"), ("AGENTS.md", "base")})
+        self.assertEqual(docs["CLAUDE.md", "base"]["text"], old_rule)
+        self.assertEqual(docs["CLAUDE.md", "head"]["text"], self.files["CLAUDE.md"])
+        self.assertNotIn("sides", docs["CLAUDE.md", "head"])
+        self.assertTrue(self.evaluate(self.assessments())["ok"])
+        entries = self.assessments()
+        entries[0]["evidence"][0]["quote"] = old_rule
+        self.assertFalse(self.evaluate(entries)["ok"])
 
     def test_stale_revision_and_policy_are_rejected(self):
         self.gate.prepare(self.target, self.pr, self.packet)

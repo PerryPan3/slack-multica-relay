@@ -68,6 +68,19 @@ class ApprovalTests(unittest.TestCase):
                 self.finish()
             api.assert_not_called()
 
+    def test_finish_accepts_current_limits_and_reports_validation_failure(self):
+        with patch.object(review,"api") as api, patch.object(review,"signed_result",return_value="signed"):
+            verdict={"decision":"REQUEST_CHANGES","summary":"审"*1000,"details":"查"*20000}
+            output=json.dumps(verdict)
+            self.assertEqual(
+                review.finish("team/repo",1,"ep",self.pr,"state","ticket",output,self.db,mode="inspect"),
+                "signed",
+            )
+            verdict["details"]+="验"
+            with self.assertRaisesRegex(review.Stop,"details 超过 20000 字符上限（当前 20001 字符）"):
+                review.finish("team/repo",1,"ep",self.pr,"state","ticket",json.dumps(verdict),self.db)
+            api.assert_not_called()
+
     def replay_after_push(self, prior_attempt=False, unstable=False):
         import base64
         self.db.execute("create table review_context(thread text,ts real,report text,primary key(thread,ts))")

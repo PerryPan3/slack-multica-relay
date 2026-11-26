@@ -3,7 +3,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/"scripts"))
 from agent_tools import readonly_sql, allowed_tool, AgentTools
 
@@ -23,7 +23,8 @@ class NativeToolsTests(unittest.TestCase):
             proposal=classify(targets,tasks)
             return {item['target']:'grant' for item in proposal['actions'] if item['action']=='continue'}
         ledger=SimpleNamespace(revoke_cancelled=Mock(),prepare=prepare,summary=lambda:tasks,planning_errors=[])
-        def classify(prompt,*args):
+        def classify(prompt,policy,*,reasoning_effort):
+            self.assertEqual(reasoning_effort,'low')
             payload=json.loads(prompt[prompt.index('{"current_request"'):])
             self.assertEqual(payload['previous_execution'],agent.previous_execution)
             self.assertEqual(payload['tasks'],tasks)
@@ -42,7 +43,7 @@ class NativeToolsTests(unittest.TestCase):
         agent.standards=SimpleNamespace(prepare=Mock(return_value={"status":"pass"}))
         agent.knowledge=Mock(return_value={'documents':[{'path':'CLAUDE.md','text':'Project rule'}]})
         result=agent.context('team/repo/pull/1')
-        agent.knowledge.assert_called_with('team/repo','a'*40,changed_paths=['models/model.sql'],raw=True)
+        agent.knowledge.assert_called_with('team/repo','a'*40,changed_paths=['models/model.sql'],raw=True,exclude_blobs={})
         self.assertEqual(result['repository_knowledge']['documents'][0]['text'],'Project rule')
         agent.knowledge.side_effect=RuntimeError('HTTP 403')
         result=agent.context('team/repo/pull/1')
@@ -77,7 +78,8 @@ class NativeToolsTests(unittest.TestCase):
         receipt=base64.urlsafe_b64encode(json.dumps({'review':42,'sha':'head','status':'APPROVE'}).encode()).decode()
         with tempfile.TemporaryDirectory() as folder:
             a.review=SimpleNamespace(ROOT=Path(folder),snapshot=Mock(return_value=pr),require_revision=Mock(),
-                                     revision=lambda p:['base','head'],finish=Mock(return_value='relay-review/2 '+receipt+'.signature'))
+                                     revision=lambda p:['base','head'],finish=Mock(return_value='relay-review/2 '+receipt+'.signature'),
+                                     validate_verdict_fields=Mock(return_value=None))
             blocked=a.submit(target,'head','APPROVE','checked','details')
             self.assertFalse(blocked['ok']);a.review.finish.assert_not_called()
             a.materials.inspect(target,'flow.tfl')
@@ -92,12 +94,112 @@ class NativeToolsTests(unittest.TestCase):
         a.may_vote=Mock(return_value='task')
         a.packets={target:({'head':{'sha':'head'},'base':{'sha':'base'}},{'file_manifest':[]})}
         a.materials=SimpleNamespace(missing=Mock(return_value=[]))
-        a.review=SimpleNamespace(finish=Mock(),snapshot=Mock())
+        a.review=SimpleNamespace(finish=Mock(),snapshot=Mock(),validate_verdict_fields=Mock(return_value=None))
         self.assertFalse(a.submit(target,'head','APPROVE','verified','all good')['ok'])
         a.standards=SimpleNamespace(evaluate=Mock(return_value={'ok':False,'findings':[{'rule':'model-suffix'}]}))
         self.assertFalse(a.submit(target,'head','APPROVE','verified','all good',[{'rule_id':'naming','status':'pass'}])['ok'])
         a.review.finish.assert_not_called()
         a.review.snapshot.assert_not_called()
+
+    def test_review_field_errors_are_actionable_before_github(self):
+        import json
+        from unittest.mock import Mock
+
+        target='team/repo/pull/1'
+        pr={'head':{'sha':'head'},'base':{'sha':'base'}}
+        agent=AgentTools.__new__(AgentTools)
+        agent.may_vote=Mock(return_value='task')
+        agent.standards_check=Mock()
+        agent.packets={target:(pr,{})}
+        agent.args={'ticket':'test-ticket'}
+        spec=importlib.util.spec_from_file_location('review_for_submit',Path(__file__).resolve().parents[1]/'scripts/github-review.py')
+        agent.review=importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(agent.review)
+        receipt='relay-review/2 '+agent.review.encode(b'{"review":null}')+'.signature'
+        cases=[
+            ('审'*1001,'细节','summary','too_long',1001,1000,
+             'summary 超过 1000 字符上限（当前 1001 字符），请精简后重试。'),
+            ('结论','审'*20001,'details','too_long',20001,20000,
+             'details 超过 20000 字符上限（当前 20001 字符），请精简后重试。'),
+            ('','细节','summary','empty',0,1000,
+             'summary 不能为空（当前 0 字符，上限 1000 字符），请填写简短中文审查结论。'),
+            ('结论','  ','details','empty',2,20000,
+             'details 不能为空（当前 2 字符，上限 20000 字符），请填写具体中文审查依据。'),
+        ]
+        with patch.object(agent.review,'snapshot',return_value=pr) as snapshot, \
+             patch.object(agent.review,'finish',return_value=receipt) as finish, \
+             patch.object(agent.review,'api') as api:
+            for summary,details,field,reason,actual,limit,error in cases:
+                with self.subTest(field=field,reason=reason):
+                    self.assertEqual(agent.submit(target,'head','REQUEST_CHANGES',summary,details),
+                        {'ok':False,'field':field,'reason':reason,'actual_chars':actual,'max_chars':limit,'error':error})
+            snapshot.assert_not_called()
+            finish.assert_not_called()
+            api.assert_not_called()
+            with tempfile.TemporaryDirectory() as folder, patch.object(agent.review,'ROOT',Path(folder)):
+                summary,details='结'*1000,'审'*20000
+                agent.submit(target,'head','REQUEST_CHANGES',summary,details)
+                self.assertEqual(json.loads(finish.call_args.args[6]),
+                    {'decision':'REQUEST_CHANGES','summary':summary,'details':details})
+                self.assertIsNone(finish.call_args.kwargs['verified_standards'])
+            agent.standards_check.assert_not_called()
+
+    def test_git_object_cache_is_shared_by_all_review_readers(self):
+        import base64
+        from collections import Counter
+        import json
+        import threading
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        from review_materials import blob_digest
+
+        target='team/repo/pull/1'
+        pr={'state':'open','head':{'sha':'a'*40},'base':{'sha':'b'*40}}
+        files={'AGENTS.md':b'Project rule', 'README.md':b'Other project knowledge', 'code.py':b'changed code'}
+        blobs={blob_digest(raw):raw for raw in files.values()}
+        rows=[{'path':path,'sha':blob_digest(raw),'size':len(raw),'type':'blob'} for path,raw in files.items()]
+        tree_paths={f'repos/team/repo/git/trees/{sha}?recursive=1' for sha in ('a'*40,'b'*40)}
+        calls=Counter()
+        def api(path):
+            calls[path]+=1
+            if path in tree_paths:
+                return {'tree':rows}
+            if '/blobs/' in path and path.rsplit('/',1)[-1] in blobs:
+                raw=blobs[path.rsplit('/',1)[-1]]
+                return {'encoding':'base64','content':base64.b64encode(raw).decode(),'size':len(raw)}
+            if '/contents/code.py?' in path:
+                return {'type':'file','sha':blob_digest(files['code.py']),'size':len(files['code.py'])}
+            return {}
+        def packet(*args):
+            return {'file_manifest':[{'filename':'code.py','status':'modified','artifact_required':True}]}
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder)
+            (root/'standards.json').write_text(json.dumps(
+                {'default':{'documents':['AGENTS.md'],'manual_rules':{}},'repositories':{}}))
+            agent=AgentTools.__new__(AgentTools)
+            agent.counts={};agent.packets={};agent._git_objects={}
+            agent._git_objects_lock=threading.Lock()
+            agent.claim={'binding':['review'],'history':[]}
+            agent.review=SimpleNamespace(ROOT=root,api=api,snapshot=Mock(return_value=pr),stable_packet=packet)
+            material=json.loads(agent.context(target)['text'])
+            knowledge={row['path']:row for row in material['repository_knowledge']['documents']}
+            self.assertEqual(knowledge['AGENTS.md']['included_in'],'standards.documents')
+            self.assertNotIn('text',knowledge['AGENTS.md'])
+            self.assertEqual(knowledge['README.md']['text'],'Other project knowledge')
+            self.assertEqual(agent.artifact(target,'code.py')['text'],'changed code')
+            self.assertEqual(agent.artifact(target,'code.py','base')['text'],'changed code')
+            agent.context(target)
+            for path in tree_paths:
+                self.assertEqual(calls[path],1)
+            for sha in blobs:
+                self.assertEqual(calls[f'repos/team/repo/git/blobs/{sha}'],1)
+            for suffix in ('pulls/1','pulls/1/reviews?per_page=100','commits/main',
+                           'git/trees/main?recursive=1','git/trees/'+'a'*40+'?recursive=0',
+                           'git/blobs/'+'a'*39,'git/blobs/'+'a'*40+'?x=1'):
+                path=f'repos/team/repo/{suffix}'
+                agent.git_object(path)
+                agent.git_object(path)
+                self.assertEqual(calls[path],2)
 
     def test_stdio_launcher_finds_sibling_executable_with_daemon_path(self):
         import asyncio,os,subprocess
@@ -110,6 +212,12 @@ class NativeToolsTests(unittest.TestCase):
             agent=AgentTools.__new__(AgentTools)
             agent.connections={'fixture':{'command':str(folder/'launcher'),'env':{'PATH':str(folder)}}}
             agent.claim={'local':True};agent.catalog={}
+            agent._stdio_workers={};agent._closed=False
+            async def discover_and_close():
+                try:
+                    return await agent.discover('fixture')
+                finally:
+                    await agent.aclose()
             @asynccontextmanager
             async def transport(params,**kwargs):
                 subprocess.run(['/usr/bin/env','helper'],env=params.env,check=True,capture_output=True)
@@ -119,12 +227,13 @@ class NativeToolsTests(unittest.TestCase):
             session.__aenter__.return_value=session
             with patch.dict(os.environ,{'PATH':'/usr/bin:/bin'}), \
                  patch('mcp.client.stdio.stdio_client',transport),patch('mcp.ClientSession',return_value=session):
-                self.assertEqual(asyncio.run(agent.discover('fixture')),[])
+                self.assertEqual(asyncio.run(discover_and_close()),[])
             # Absolute launchers must also supply their directory for env shebangs.
             agent.connections['fixture'].pop('env')
+            agent._closed=False
             with patch.dict(os.environ,{'PATH':'/usr/bin:/bin'}), \
                  patch('mcp.client.stdio.stdio_client',transport),patch('mcp.ClientSession',return_value=session):
-                self.assertEqual(asyncio.run(agent.discover('fixture')),[])
+                self.assertEqual(asyncio.run(discover_and_close()),[])
 
     def test_discovery_error_survives_mcp_result_validation(self):
         import asyncio,json
@@ -197,7 +306,8 @@ class NativeToolsTests(unittest.TestCase):
         body=base64.urlsafe_b64encode(json.dumps({"review":42,"sha":"head","status":"APPROVE"}).encode()).decode()
         with tempfile.TemporaryDirectory() as temp:
             agent.review=SimpleNamespace(ROOT=Path(temp),snapshot=Mock(return_value=pr),revision=lambda p:[p["base"]["sha"],p["head"]["sha"]],
-                require_revision=Mock(),finish=Mock(return_value="relay-review/2 "+body+".signature"))
+                require_revision=Mock(),finish=Mock(return_value="relay-review/2 "+body+".signature"),
+                validate_verdict_fields=Mock(return_value=None))
             result=agent.submit(target,"head","APPROVE","checked","evidence")
             self.assertEqual(agent.review.finish.call_args.args[2],"repos/team/repo/pulls/696")
             self.assertEqual(agent.review.finish.call_args.args[4:6],("stable-task","follow-up-ticket"))
@@ -221,7 +331,8 @@ class NativeToolsTests(unittest.TestCase):
             body=base64.urlsafe_b64encode(json.dumps({"review":42,"sha":"head","status":decision}).encode()).decode()
             return "relay-review/2 "+body+".signature"
         with tempfile.TemporaryDirectory() as temp:
-            agent.review=SimpleNamespace(ROOT=Path(temp),snapshot=Mock(return_value=pr),revision=lambda p:[p["base"]["sha"],p["head"]["sha"]],require_revision=Mock(),finish=Mock(side_effect=response))
+            agent.review=SimpleNamespace(ROOT=Path(temp),snapshot=Mock(return_value=pr),revision=lambda p:[p["base"]["sha"],p["head"]["sha"]],require_revision=Mock(),finish=Mock(side_effect=response),
+                                         validate_verdict_fields=Mock(return_value=None))
             agent.submit(target,"head","COMMENT","Evidence gap","Need current compiled output")
             self.assertEqual(agent.review.finish.call_args.args[4],"stable-task-comment-head")
             agent.tasks.complete.assert_not_called()
@@ -403,7 +514,7 @@ class NativeSessionTests(unittest.TestCase):
             first,claim=request(time.time());second,nextclaim=request(time.time()+1)
             def operations(args,key,directory):
                 return SimpleNamespace(claim=claim if args==first else nextclaim,counts={},receipts=[],
-                    prepare_reviews=lambda:{'continue_to_verdict':[]},services=lambda:[])
+                    prepare_reviews=lambda:{'continue_to_verdict':[]},services=lambda:[],aclose=AsyncMock())
             calls=[]
             def model(command,**kwargs):
                 calls.append((command,json.loads(kwargs['input'].splitlines()[-1])))
@@ -424,5 +535,106 @@ class NativeSessionTests(unittest.TestCase):
             def decode(reply):return json.loads(base64.urlsafe_b64decode(reply['reply'].split(' ',1)[1].split('.')[0]+'==='))
             self.assertIn('信号 15',decode(interrupted)['text'])
             self.assertEqual(decode(resumed)['text'],'已核对并继续完成')
+
+class StdioSessionTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        from textwrap import dedent
+
+        code=dedent("""
+            import json
+            import os
+            import sys
+            import time
+
+            initialized=0
+            for line in sys.stdin:
+                request=json.loads(line)
+                if "id" not in request:
+                    continue
+                method=request["method"]
+                if method=="initialize":
+                    initialized+=1
+                    result={"protocolVersion":request["params"]["protocolVersion"],
+                            "capabilities":{"tools":{}},"serverInfo":{"name":"fixture","version":"1"}}
+                elif method=="tools/list":
+                    result={"tools":[{"name":"get_status","inputSchema":{"type":"object"}}]}
+                elif method=="tools/call":
+                    action=request["params"].get("arguments",{}).get("action")
+                    if action=="disconnect":
+                        os._exit(3)
+                    if action=="hang":
+                        time.sleep(60)
+                    result={"content":[],"structuredContent":{"pid":os.getpid(),"initialized":initialized,
+                              "allow_write":os.environ.get("REDSHIFT_ALLOW_WRITE")}}
+                else:
+                    raise AssertionError(method)
+                print(json.dumps({"jsonrpc":"2.0","id":request["id"],"result":result}),flush=True)
+        """)
+        self.agent=AgentTools.__new__(AgentTools)
+        self.agent.claim={'business':True}
+        self.agent.catalog={}
+        self.agent.counts={}
+        self.agent._stdio_workers={}
+        self.agent._closed=False
+        self.service='redshift-fixture'
+        self.agent.connections={self.service:{'command':sys.executable,'args':['-c',code],
+                                        'env':{'REDSHIFT_ALLOW_WRITE':'true'}}}
+        self.addAsyncCleanup(self.agent.aclose)
+
+    async def read_status(self,action=None):
+        args={} if action is None else {'action':action}
+        return (await self.agent.read(self.service,'get_status',args))['result']['structuredContent']
+
+    async def test_reuses_session_and_reaps_child_on_close(self):
+        import asyncio
+        import os
+
+        expected=[{'name':'get_status','description':None,'parameters':{'type':'object'}}]
+        self.assertEqual(await self.agent.discover(self.service),expected)
+        first,second=await asyncio.gather(self.read_status(),self.read_status())
+        self.assertEqual(first,second)
+        self.assertEqual(first['initialized'],1)
+        self.assertEqual(first['allow_write'],'false')
+        self.assertEqual(await self.agent.discover(self.service),expected)
+        self.assertEqual(first,await self.read_status())
+        worker=self.agent._stdio_workers[self.service].task
+        await self.agent.aclose()
+        self.assertTrue(worker.done())
+        self.assertFalse(self.agent._stdio_workers)
+        with self.assertRaises(ProcessLookupError):
+            os.kill(first['pid'],0)
+
+    async def test_disconnect_drops_worker_and_next_read_reconnects(self):
+        import asyncio
+        import os
+        from agent_runtime import tool_failure
+
+        first=await self.read_status()
+        with self.assertRaises(Exception) as failure:
+            async with asyncio.timeout(5):
+                await self.read_status('disconnect')
+        self.assertTrue(tool_failure(failure.exception)['retryable'])
+        self.assertNotIsInstance(failure.exception,TimeoutError)
+        self.assertNotIn(self.service,self.agent._stdio_workers)
+        with self.assertRaises(ProcessLookupError):
+            os.kill(first['pid'],0)
+        second=await self.read_status()
+        self.assertNotEqual(first['pid'],second['pid'])
+        self.assertEqual(second['initialized'],1)
+
+    async def test_timeout_reaps_process_and_next_read_reconnects(self):
+        import asyncio
+        import os
+
+        first=await self.read_status()
+        with self.assertRaises(TimeoutError):
+            async with asyncio.timeout(.2):
+                await self.read_status('hang')
+        self.assertNotIn(self.service,self.agent._stdio_workers)
+        with self.assertRaises(ProcessLookupError):
+            os.kill(first['pid'],0)
+        second=await self.read_status()
+        self.assertNotEqual(first['pid'],second['pid'])
+
 
 unittest.main()

@@ -208,10 +208,16 @@ def prompt(packet, ops, history):
     )
 
 
-def isolated_turn(prompt_text, policy):
+def isolated_turn(prompt_text, policy, *, reasoning_effort: str | None = None):
     # Preserve the Slack model's deny-all hook. Only the host can dispatch evidence calls.
     import tempfile
     import network_recovery
+
+    command = [str(PRIVATE / "bin/codex"), "exec", "--ephemeral", "--skip-git-repo-check", "--color", "never"]
+    if reasoning_effort is not None:
+        if reasoning_effort not in ("low", "medium", "high", "xhigh"):
+            raise ValueError("Unsupported reasoning effort.")
+        command += ["-c", f'model_reasoning_effort="{reasoning_effort}"']
 
     if network_recovery.enabled() and not network_recovery.reachable():
         raise network_recovery.NetworkWait()
@@ -219,7 +225,7 @@ def isolated_turn(prompt_text, policy):
     with tempfile.TemporaryDirectory(prefix="perry-evidence-") as cwd:
         import signal
         process=subprocess.Popen(
-            [str(PRIVATE / "bin/codex"), "exec", "--ephemeral", "--skip-git-repo-check", "--color", "never", "-"],
+            command + ["-"],
             stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,cwd=cwd,
             env={"CODEX_HOME":str(PRIVATE / "model-home")},start_new_session=True)
         try:
