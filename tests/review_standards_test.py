@@ -170,6 +170,69 @@ class StandardsTests(unittest.TestCase):
                                       "rule_id": state["findings"][0]["resolution_rule"]}]
         self.assertFalse(self.evaluate(entries)["ok"])
 
+    def test_in_repo_rule_symlink_and_tsx_css_binary_changed_files_pass(self):
+        rule_text = "All frontend requests must go through Query Kit mutations."
+        tsx_text = "export function OmniDrawer() { return useOmniSessionMutation(); }"
+        css_text = ".omni-drawer { display: flex; }"
+        png_bytes = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"
+        entries_map = {
+            "AGENTS.md": (rule_text.encode(), "100644"),
+            "CLAUDE.md": (b"AGENTS.md\n", "120000"),
+            "README.md": (b"Repository overview and setup instructions.", "100644"),
+            "src/OmniDrawer.tsx": (tsx_text.encode(), "100644"),
+            "src/OmniDrawer.css": (css_text.encode(), "100644"),
+            "src/preview.png": (png_bytes, "100644"),
+        }
+        self.policy = {"documents": ["README.md"], "manual_rules": {"project_rules": "Check repo rules"}}
+        self.save_policy()
+        self.packet = {"file_manifest": [
+            {"filename": "src/OmniDrawer.tsx", "status": "modified"},
+            {"filename": "src/OmniDrawer.css", "status": "added"},
+            {"filename": "src/preview.png", "status": "added"},
+        ]}
+        def api(path):
+            if "/git/trees/" in path:
+                return {"tree": [{"path": p, "sha": blob_digest(raw), "size": len(raw),
+                                  "type": "blob", "mode": mode} for p, (raw, mode) in entries_map.items()]}
+            sha = path.rsplit("/", 1)[-1]
+            raw = next(r for r, _ in entries_map.values() if blob_digest(r) == sha)
+            return {"encoding": "base64", "content": base64.b64encode(raw).decode()}
+        self.gate = ReviewStandards(api, self.root)
+        prepared = self.gate.prepare(self.target, self.pr, self.packet)
+        self.assertEqual(prepared["status"], "pass", prepared)
+        head_docs = {d["path"]: d for d in prepared["documents"] if d["side"] == "head"}
+        self.assertEqual(head_docs["CLAUDE.md"]["symlink_target"], "AGENTS.md")
+        self.assertEqual(head_docs["CLAUDE.md"]["same_as_path"], "AGENTS.md")
+        self.assertNotIn("text", head_docs["CLAUDE.md"])
+        assessments = [{
+            "rule_id": "project_rules",
+            "status": "pass",
+            "reason": "Verified OmniDrawer uses Query Kit mutation per AGENTS.md.",
+            "evidence": [
+                {"path": "AGENTS.md", "quote": rule_text},
+                {"path": "src/OmniDrawer.tsx", "quote": tsx_text},
+            ],
+        }]
+        self.assertTrue(self.evaluate(assessments)["ok"])
+
+    def test_escaping_or_broken_rule_symlink_fails_closed(self):
+        for bad_target in (b"../outside.md", b"/etc/passwd", b"missing.md"):
+            with self.subTest(target=bad_target):
+                entries_map = {
+                    "CLAUDE.md": (bad_target, "120000"),
+                    "code.py": (b"def f(): return 1", "100644"),
+                }
+                def api(path, data=entries_map):
+                    if "/git/trees/" in path:
+                        return {"tree": [{"path": p, "sha": blob_digest(raw), "size": len(raw),
+                                          "type": "blob", "mode": mode} for p, (raw, mode) in data.items()]}
+                    sha = path.rsplit("/", 1)[-1]
+                    raw = next(r for r, _ in data.values() if blob_digest(r) == sha)
+                    return {"encoding": "base64", "content": base64.b64encode(raw).decode()}
+                gate = ReviewStandards(api, self.root)
+                prepared = gate.prepare(self.target, self.pr, self.packet)
+                self.assertEqual(prepared["status"], "incomplete")
+
 
 if __name__ == "__main__":
     unittest.main()
