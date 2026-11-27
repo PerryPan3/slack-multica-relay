@@ -267,6 +267,8 @@ export async function createComment(
 }
 
 export interface IssueRun {
+  started_at?: string | null;
+  completed_at?: string | null;
   usage?: { model?: unknown }[];
   trigger_comment_id?: string | null;
   result?: { output?: unknown } | null;

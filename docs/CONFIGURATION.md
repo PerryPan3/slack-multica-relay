@@ -214,6 +214,12 @@ Cloudflare 沿用现有 QStash 和 Upstash Redis，不使用 Cloudflare Queues�
 
 ### Worker 回复个人自聊
 
+在 `WORKER_THREAD_REPLIES=true` 的部署中，`NATIVE_MULTICA_REPLIES=true` 会让 Worker 把普通 Multica 输出渲染为 Slack Markdown。兼容模式可将该值设为 `false`。两种模式都使用现有发送账本。
+
+原生 Codex 使用 `scripts/setup_native_codex_home.py` 生成独立配置。默认目录为 `.private/runtime/native-codex-home`，可用 `--target` 指定测试目录。首次运行前在该 Codex home 的 `/hooks` 中核对并信任 PreToolUse 命令。写操作使用当前 run 的 issue、workspace 及触发评论定位 Slack 消息，再用宿主的 `.private/runtime/review/key` 验证 Worker 签名。缺少运行身份或有效签名时，外部写命令会被拦截。
+
+生成的 shell 权限配置允许工作区写入，保护凭据路径，并允许访问 `github.com` 和 `api.github.com`。MCP 服务沿用各自的凭据和权限。需要直连数仓的 dbt 命令或需要其他网络目的地的发布命令，仍受运行环境的网络权限约束。Hook 检查 Codex 传入的工具调用，脚本或测试进程里的后续操作不会逐条触发 hook。
+
 当 `WORKER_THREAD_REPLIES=true` 时，队列消费者从目标 Multica 任务读取最终文本，使用 Worker 中的 Slack 用户凭据回复原线程。本机 Agent 只生成正文。此模式要求发送人名单中只有一位所有者，且该用户也是提及目标。
 
 设置 `SLACK_SELF_ASSIGN_SCOPE=dm` 可接受所有者在其他单聊里明确 @自己的消息，设置为 `all` 也可接受其所在频道和多人私聊。其他人的权限仍按频道和发送人的配对检查，屏蔽名单优先。新增会话用所有者的用户凭据读取，需为对应会话类型安装用户级 history 权限并订阅消息事件。上下文限于当前线程。每次回复都依据首次冻结的消息、绑定的项目和 Agent，以及对应运行结果核对目标。队列最多等待约 60 分钟，覆盖单次本机 Agent 的 30 分钟执行时限；等待到期不代表任务完成。

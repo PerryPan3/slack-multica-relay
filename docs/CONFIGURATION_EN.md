@@ -214,6 +214,14 @@ Private deployment records track the Git commit, Worker version, and actual traf
 
 Cloudflare retains QStash and Upstash Redis; it does not replace them with Cloudflare Queues, KV, or D1. The Python reply adapter and durable ledger stay on the private Multica Runtime. Account CPU and subrequest limits must accommodate context reads and recovery paths. Local tests and dry-run builds do not prove a live end-to-end deployment.
 
+### Native Multica replies
+
+With `WORKER_THREAD_REPLIES=true`, set `NATIVE_MULTICA_REPLIES=true` to render ordinary Multica output as Slack Markdown. Set it to `false` for plain text. Both modes use the existing delivery ledger.
+
+Generate the isolated Codex configuration with `scripts/setup_native_codex_home.py`. The default target is `.private/runtime/native-codex-home`. Use `--target` for a test directory. Review and trust the PreToolUse command in that home's `/hooks` before activating the runtime. For external writes, the hook identifies the current issue, workspace, run and triggering comment, then verifies the Worker's signed Slack message using the host's `.private/runtime/review/key`. Missing identity or signature blocks the write.
+
+The generated shell profile allows workspace writes, protects credential paths, and allows access to `github.com` and `api.github.com`. Each MCP server uses its own credentials and permissions. Direct warehouse connections from dbt and deployments to other network destinations require corresponding runtime network access. The hook sees the incoming Codex call. A script or test process can perform further operations without invoking another hook.
+
 ### GitHub pull request reviews from the local agent
 
 Set `GITHUB_REVIEW_CHANNEL` and `GITHUB_REVIEW_SIGNING_KEY` to enable reviews in one admitted Slack channel. The Worker signs the triggering message, sender, thread, and PR. The local runtime verifies the signature, reads the diff and previous reviews using its configured GitHub account, and submits the decision against the exact commit it reviewed. It reads back the review ID, author, commit, and state before returning the approval link. Keep the GitHub credential on the host. The local receipt database records pending writes so retries can reconcile the same review. Unsupported or incomplete diffs, stale commits, draft PRs, self-reviews, and denied access cannot produce an approval. Set `GITHUB_REVIEW_WORKSPACE_SLUG` to include a Multica task link in the Slack footer.

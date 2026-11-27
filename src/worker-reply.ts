@@ -4,7 +4,7 @@ import { businessPresentation, businessAllowed, type BusinessScope } from "./sem
 import { genericReviewReply, reviewPresentation, reviewStatistics } from "./github-review.js";
 import { compareTs } from "./context-envelope.js";
 import type { RelayConfig } from "./config.js";
-import { getIssue, listIssueRuns, findComment } from "./multica-api.js";
+import { getIssue, listIssueRuns, findComment, type IssueRun } from "./multica-api.js";
 import { findTargetMention, allowedSourceApp, isSupportedMessage } from "./mentions.js";
 import { readTaskEnvelope } from "./task-presentation.js";
 import {
@@ -22,6 +22,38 @@ export function agentSlackText(text: string): string {
   return text.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")
     .replace(/\[([^\]\n]+)\]\((https:\/\/[^\s()]+)\)/g,"<$2|$1>")
     .replace(/\*\*([^*\n]+)\*\*/g,(_,content:string)=>content.includes("`")?content:"*"+content+"*");
+}
+
+function nativeDuration(run: IssueRun): number | undefined {
+  const timestamp = (value: unknown) => {
+    if (typeof value !== "string" || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?(?:Z|[+-]\d\d:\d\d)$/i.test(value)) return NaN;
+    const day = new Date(value.slice(0, 10) + "T00:00:00Z");
+    return Number.isFinite(day.getTime()) && day.toISOString().startsWith(value.slice(0, 10))
+      ? Date.parse(value) : NaN;
+  };
+  const elapsed = timestamp(run.completed_at) - timestamp(run.started_at);
+  return elapsed >= 0 ? Math.floor(elapsed / 1000) : undefined;
+}
+
+function replySections(visible: string, markdown: boolean, keepLinks: boolean) {
+  const chars = Array.from(markdown ? agentSlackText(visible) : visible);
+  const sections = [];
+  for (let start = 0; start < chars.length;) {
+    let end = Math.min(start + 3000, chars.length);
+    if (keepLinks && end < chars.length) {
+      const chunk = chars.slice(start, end);
+      const openLink = chunk.lastIndexOf("<");
+      if (openLink > 0 && openLink > chunk.lastIndexOf(">")) end = start + openLink;
+      else {
+        const newline = chunk.lastIndexOf("\n");
+        if (newline >= 1500) end = start + newline + 1;
+      }
+    }
+    const text = chars.slice(start, end).join("");
+    sections.push({type: "section", text: markdown ? {type: "mrkdwn", text, verbatim: true} : {type: "plain_text", text}});
+    start = end;
+  }
+  return sections;
 }
 
 interface ReplyJob {
@@ -218,7 +250,7 @@ export async function deliverReply(
   if (
     typeof output !== "string" ||
     !output.trim() ||
-    Array.from(output).length > (frozen.context?.githubReviewTicket ? 256000 : 12000)
+    Array.from(output).length > (frozen.context?.githubReviewTicket ? 256000 : config.nativeMulticaReplies ? 32000 : 12000)
   )
     return "invalid_reply_text";
   const internal = reviewPresentation(output,frozen.context?.githubReviewTicket,reviewKey)?.internalFailure;
@@ -295,27 +327,25 @@ export async function deliverReply(
       if (!e.channelId.startsWith('D')) return 'internal_failure_suppressed';
     }
   }
-  const visible = business?.text || review?.text || (frozen.context?.githubReviewTicket ? output.trim() : genericReviewReply(e.text, output));
-  if (Array.from(visible).length>32000) return "invalid_reply_text";
-  const agentOutput=output.startsWith("relay-agent/1 ");
-  const chars = Array.from(agentOutput?agentSlackText(visible):visible);
-  const blocks: unknown[] = [];
-  for (let i = 0; i < chars.length; i += 3000)
-    blocks.push({
-      type: "section",
-      text: agentOutput
-        ? {type:"mrkdwn",text:chars.slice(i,i+3000).join(""),verbatim:true}
-        : { type: "plain_text", text: chars.slice(i, i + 3000).join("") },
-    });
-  const issueLink = (review || business) && reviewWorkspaceSlug && /^[a-z0-9-]+$/.test(reviewWorkspaceSlug)
+  const native = config.nativeMulticaReplies === true && !!completed[0] && !review && !business && !legacyFailure;
+  const trimmed = output.trim();
+  const checkAcknowledgement = (native || !frozen.context?.githubReviewTicket) && trimmed.length < 100;
+  const visible = business?.text || review?.text || (checkAcknowledgement ? genericReviewReply(e.text, trimmed) : trimmed);
+  if (Array.from(visible).length > 32000) return "invalid_reply_text";
+  const blocks: unknown[] = replySections(visible, native || output.startsWith("relay-agent/1 "), native);
+  const issueLink = (review || business || native) && reviewWorkspaceSlug && /^[a-z0-9-]+$/.test(reviewWorkspaceSlug)
     ? new URL("/" + reviewWorkspaceSlug + "/issues/" + job.issueId, config.multicaApiBaseUrl).href
     : undefined;
   const usage = completed[0]?.usage;
   const models = Array.isArray(usage) ? usage.flatMap(u => u && typeof u.model === "string" ? [u.model] : []) : [];
   const contextLines: string[] = [];
-  const stats = review ?? business;
+  const stats = review ?? business ?? (native ? {seconds: nativeDuration(completed[0]), tools: []} : undefined);
   if (stats) {
-    contextLines.push(reviewStatistics(stats, review?.models?.length ? review.models : models));
+    const fallback = native && frozen.replyContext?.status === "available" && typeof frozen.replyContext.model === "string"
+      ? [frozen.replyContext.model] : [];
+    const resolvedModels = review?.models?.length ? review.models : models.some(m => m.trim()) ? models : fallback;
+    const statistics = reviewStatistics(stats, resolvedModels);
+    if (statistics) contextLines.push(statistics);
     const label = typeof issue.identifier === "string" && /^[A-Z][A-Z0-9-]*-\d+$/.test(issue.identifier) ? issue.identifier : "Multica 任务";
     if (issueLink) contextLines.push("<" + issueLink + "|" + label + ">");
     if (review?.repositoryLine) contextLines.push(review.repositoryLine);
@@ -331,6 +361,7 @@ export async function deliverReply(
       { type: "plain_text", text: "Sent by 🤖 Perry’s Agent" },
     ],
   });
+  if (native && blocks.length > 50) return "invalid_reply_text";
   if (!(await store.setIfAbsent(ledger, "attempting", STATE_TTL_SECONDS)))
     return "delivery_in_progress";
   const response = await send("https://slack.com/api/chat.postMessage", {
