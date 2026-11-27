@@ -46,7 +46,7 @@ it("delivers a valid Chinese answer whose signed transport exceeds the display l
   expect(await deliverReply(f.job,config,f.send,undefined,undefined,"key")).toBe("sent");
   expect(f.posted()?.text).toContain(packet.text);
 });
-function fixture(source: SlackThreadEvent = event, readIdentity = source.channelId.startsWith("D") ? "user-test" : "bot-test", ticket="ticket") {
+function fixture(source: SlackThreadEvent = event, readIdentity = source.channelId.startsWith("D") ? "user-test" : "bot-test", ticket="ticket", replyContext?: unknown) {
   const event = source;
   const job = replyJob(event, issueId),
     scope = digest("workspace:project:agent");
@@ -54,7 +54,7 @@ function fixture(source: SlackThreadEvent = event, readIdentity = source.channel
     ["relay:" + scope + ":thread:" + job.thread, JSON.stringify({ issueId })],
     [
       "relay:" + scope + ":message:" + job.message + ":envelope",
-      JSON.stringify({ eventPayload: event, context:{githubReviewTicket:ticket} }),
+      JSON.stringify({ eventPayload: event, context:{githubReviewTicket:ticket}, replyContext }),
     ],
   ]);
   let posted: Record<string, unknown> | undefined;
@@ -68,6 +68,7 @@ function fixture(source: SlackThreadEvent = event, readIdentity = source.channel
     loseResponse: false,
     queued: 0,
     output: "test reply",
+    run: {} as Record<string, unknown>,
   };
   const send: typeof fetch = async (url, init) => {
     const endpoint = String(url);
@@ -93,6 +94,7 @@ function fixture(source: SlackThreadEvent = event, readIdentity = source.channel
           status: state.runStatus,
           result: { output: state.output },
           usage: [{model:"test-model"}],
+          ...state.run,
         },
       ]);
     if (endpoint.endsWith("/issues/" + issueId))
@@ -409,4 +411,58 @@ it('keeps a signed disconnected task quiet and delivers the recovered result onc
   expect(await deliverReply(f.job,config,f.send,undefined,undefined,'key')).toBe('sent');
   expect(await deliverReply(f.job,config,f.send,undefined,undefined,'key')).toBe('already_sent');
   expect(f.state.posts).toBe(1);
+});
+
+describe("native Multica Markdown", () => {
+  const native = {...config, nativeMulticaReplies: true};
+  it("keeps a link intact across the section limit and attaches stats to the verified delivery", async () => {
+    const f = fixture(event, "user-test", "", {status: "available", model: "configured"});
+    const prefix = "🙂".repeat(2990);
+    f.state.output = prefix + "[review](https://github.com/team/repo/pull/19) **done** <!channel>";
+    f.state.run = {started_at: "2026-01-01T00:00:00Z", completed_at: "2026-01-01T01:02:25+01:00"};
+    expect(await deliverReply(f.job, native, f.send, undefined, undefined, undefined, "perry-slack")).toBe("sent");
+    expect(f.posted()?.blocks).toEqual([
+      {type: "section", text: {type: "mrkdwn", text: prefix, verbatim: true}},
+      {type: "section", text: {type: "mrkdwn", text: "<https://github.com/team/repo/pull/19|review> *done* &lt;!channel&gt;", verbatim: true}},
+      {type: "context", elements: [{type: "mrkdwn", text: "⏱ 2m 25s · 🤖 test-model"}]},
+      {type: "context", elements: [{type: "mrkdwn", text: `<https://tasks.test/perry-slack/issues/${issueId}|TASK-6>`}]},
+      {type: "context", block_id: expect.stringMatching(/^relay-delivery-/), elements: [{type: "plain_text", text: "Sent by 🤖 Perry’s Agent"}]},
+    ]);
+    expect(await deliverReply(f.job, native, f.send)).toBe("already_sent");
+  });
+  it.each([
+    [null, null, "available", "🤖 configured"],
+    ["nonsense", "2026-01-01T01:00:00Z", "available", "🤖 configured"],
+    ["2026-02-30T01:00:00Z", "2026-03-10T01:00:00Z", "available", "🤖 configured"],
+    ["2026-01-01T01:00:00Z", "2026-01-01T00:00:00Z", "unavailable", ""],
+    ["2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z", "available", "⏱ 0s · 🤖 configured"],
+  ])("renders only known run metadata (%s, %s, %s)", async (started_at, completed_at, status, stats) => {
+    const f = fixture(event, "user-test", "ticket", {status, model: "configured"});
+    f.state.run = {usage: [], started_at, completed_at};
+    await deliverReply(f.job, native, f.send, undefined, undefined, undefined, "/invalid");
+    expect(f.posted()?.text).toBe("test reply\n\n" + (stats ? stats + "\n" : "") + "Sent by 🤖 Perry’s Agent");
+  });
+  it.each([undefined, false])("preserves plain replies with flag %s", async flag => {
+    const f = fixture();
+    f.state.output = "**done**";
+    await deliverReply(f.job, {...config, nativeMulticaReplies: flag}, f.send, undefined, undefined, undefined, "perry");
+    expect(f.posted()?.blocks).toMatchObject([
+      {type: "section", text: {type: "plain_text", text: "**done**"}}, {type: "context", block_id: expect.any(String)},
+    ]);
+  });
+  it("preserves the short review acknowledgement check and signed protocol checks", async () => {
+    const setup = () => fixture({...event, text: "<@U1> review"}, "user-test", "");
+    for (const output of ["收到", "收到。以下是审查结果。".repeat(20)]) {
+      const f = setup();
+      f.state.output = output;
+      await deliverReply(f.job, native, f.send);
+      expect(f.posted()?.text).toContain(output.length < 100 ? "没有启动 GitHub 审查" : output);
+    }
+    for (const output of ["relay-business/1 bad", "relay-agent/1 bad", "relay-review/2 bad"]) {
+      const f = setup();
+      f.state.output = output;
+      expect(await deliverReply(f.job, native, f.send)).toMatch(/^invalid_/);
+      expect(f.state.posts).toBe(0);
+    }
+  });
 });

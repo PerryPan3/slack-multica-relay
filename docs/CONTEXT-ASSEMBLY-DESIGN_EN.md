@@ -126,6 +126,8 @@ A definite send rate limit persists `rate_limited/retryAt` and permits retry onl
 
 ### Worker review footer
 
+With native replies enabled, the Worker renders ordinary Markdown in Slack section blocks. Elapsed time comes from the matched run's timestamps. The footer uses its usage models, falling back to the available model frozen with the request. A valid workspace slug adds the issue link. Missing or reversed timestamps omit the duration.
+
 When Worker replies are enabled, the Worker renders review bodies as section blocks and metadata as separate context rows. Signed v2 receipts carry the decision, confirmed GitHub review, repository and commit, duration, and host-recorded tool counts; v1 receipts remain readable. Incomplete reviews retain statistics, task and PR links but have no approval link. Model names come from the matched run usage and are omitted when unavailable. The issue identifier comes from the verified Issue. The final attribution row retains the unique delivery marker, and fallback text includes the same information.
 
 Marked historical messages may use mrkdwn or plain_text body and footer objects; both follow the existing footer-removal rules. Delivery ledger, source verification and post-send readback remain unchanged.

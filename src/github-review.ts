@@ -103,10 +103,13 @@ export function reviewPresentation(output: string, ticket: unknown, key?: string
   } catch { return; }
 }
 
-export function reviewStatistics(review: {seconds:number;tools:{name:string;count:number;failed:number}[]}, models: string[]) {
-  const minutes = Math.floor(review.seconds / 60), seconds = review.seconds % 60;
-  const duration = (minutes ? minutes + "m " : "") + seconds + "s";
+export function reviewStatistics(review: {seconds?:number;tools:{name:string;count:number;failed:number}[]}, models: string[]) {
+  const duration: string[] = [];
+  if (review.seconds !== undefined) {
+    const minutes = Math.floor(review.seconds / 60);
+    duration.push("⏱ " + (minutes ? minutes + "m " : "") + review.seconds % 60 + "s");
+  }
   const verifiedModels = [...new Set(models.filter(m => /^[A-Za-z0-9][A-Za-z0-9._:/@+\-]{0,99}$/.test(m)))];
-  return ["⏱ " + duration, ...(verifiedModels.length ? ["🤖 " + verifiedModels.join(" / ")] : []),
+  return [...duration, ...(verifiedModels.length ? ["🤖 " + verifiedModels.join(" / ")] : []),
     ...review.tools.map(t => "🔧 " + t.name + " ×" + t.count + (t.failed ? "（" + t.failed + " 次未取得结果）" : ""))].join(" · ");
 }
