@@ -1,6 +1,6 @@
 """Request-bound tools for the native Slack agent. Credentials stay in the host."""
 import asyncio
-from contextlib import closing
+from contextlib import asynccontextmanager, closing
 import base64
 import hashlib
 import importlib.util
@@ -26,6 +26,23 @@ SQL_TOOLS = {"execute_query", "query", "run_query", "execute_sql", "redshift_que
 SQL_FIELDS = ("sql", "query", "sql_query", "statement")
 
 
+# sqlglot represents these dialect built-ins as Anonymous in some versions.
+WAREHOUSE_FUNCTIONS = {
+    "redshift": frozenset("""
+        format_type convert_timezone has_table_privilege has_schema_privilege has_database_privilege
+        pg_get_viewdef json_extract_path_text json_array_length split_part regexp_substr regexp_count
+        date_diff listagg nvl nvl2 isnull decode btrim octet_length approx_count_distinct
+        percentile_cont median sysdate getdate current_database current_schema version
+    """.split()),
+    "postgres": frozenset("""
+        format_type has_table_privilege has_schema_privilege has_database_privilege pg_get_viewdef
+        json_extract_path_text split_part regexp_substr regexp_count btrim octet_length
+        percentile_cont current_database current_schema version
+    """.split()),
+    "clickhouse": frozenset(("formatDateTime", "dateDiff", "toDateTime", "toDate", "version")),
+}
+
+
 def readonly_sql(value, dialect="redshift"):
     """Allow bounded SELECTs, joins and CTEs without write expressions."""
     import sqlglot
@@ -36,8 +53,11 @@ def readonly_sql(value, dialect="redshift"):
     tree=trees[0]
     if any(isinstance(node,(exp.DDL,exp.DML,exp.Command,exp.Into,exp.Lock)) for node in tree.walk()):
         raise ValueError("SQL writes and locking clauses are not permitted.")
-    if any(isinstance(node,exp.Anonymous) for node in tree.walk()):
-        raise ValueError("Use built-in SQL functions. User-defined functions are unavailable.")
+    for function in tree.find_all(exp.Anonymous):
+        name=function.name if dialect=="clickhouse" else function.name.lower()
+        if (name not in WAREHOUSE_FUNCTIONS.get(dialect, ()) or isinstance(function.this,exp.Identifier)
+                or isinstance(function.parent,exp.Dot)):
+            raise ValueError("Use built-in SQL functions. User-defined functions are unavailable.")
     bound=tree.args.get("limit")
     if bound:
         try:
@@ -49,10 +69,56 @@ def readonly_sql(value, dialect="redshift"):
     return tree.limit(200).sql(dialect=dialect)
 
 
-def allowed_tool(tool):
+def allowed_tool(tool, server=None):
+    if server=="redshift" and tool["name"]=="redshift_check_table": return True
     if tool["name"] in SQL_TOOLS or tool["name"]=="run_soql_query": return True
     if WRITE_NAME.search(tool["name"]): return False
     return bool(READ_NAME.search(tool["name"]) or (tool.get("annotations") or {}).get("readOnlyHint") is True)
+
+
+class UpstreamSession:
+    """One task owns the transport and its anyio cancel scopes for their whole lifetime."""
+
+    def __init__(self, connect, dispatch, disconnected):
+        self.queue = asyncio.Queue()
+        self.active = None
+        self.disconnected = disconnected
+        self.task = asyncio.create_task(self.serve(connect, dispatch))
+        self.task.add_done_callback(self.finished)
+
+    async def request(self, *args):
+        reply = asyncio.get_running_loop().create_future()
+        self.queue.put_nowait((reply, args))
+        try:
+            return await reply
+        except asyncio.CancelledError:
+            if self.active is reply:
+                self.task.cancel()
+                await asyncio.gather(self.task, return_exceptions=True)
+            raise
+
+    async def serve(self, connect, dispatch):
+        self.active, args = await self.queue.get()
+        async with connect() as session:
+            await session.initialize()
+            while True:
+                if not self.active.cancelled():
+                    result = await dispatch(session, *args)
+                    if not self.active.done():
+                        self.active.set_result(result)
+                self.active = None
+                self.active, args = await self.queue.get()
+
+    def finished(self, task):
+        self.disconnected()
+        error = None if task.cancelled() else task.exception()
+        error = error or ConnectionError("Upstream session closed.")
+        pending = [self.active]
+        while not self.queue.empty():
+            pending.append(self.queue.get_nowait()[0])
+        for reply in pending:
+            if reply is not None and not reply.done():
+                reply.set_exception(error)
 
 
 class AgentTools:
@@ -63,6 +129,8 @@ class AgentTools:
         self.claim=slack_intent.verified(args,key)
         self.connections=tomllib.loads((Path.home()/".codex/config.toml").read_text()).get("mcp_servers",{})
         self.catalog={}
+        self.sessions={}
+        self.closed=False
         self.results={}
         self.counts={}
         self.receipts=[]
@@ -87,34 +155,60 @@ class AgentTools:
                 and not any(word in name.lower() for word in ("chrome","browser","node_repl","computer"))]
 
     async def upstream(self,server,method,tool=None,arguments=None):
-        from mcp import ClientSession, StdioServerParameters
-        from mcp.client.stdio import stdio_client
-        from mcp.client.streamable_http import streamable_http_client
         if server not in self.services():
             raise ValueError("This service is not available for this request.")
         if not (self.claim.get("business") or self.claim.get("review") or self.claim.get("local")):
             raise ValueError("This request has no read-tool capability.")
+        if self.closed:
+            raise RuntimeError("This request is closed.")
+        if server not in self.sessions:
+            actor = None
+            def disconnected():
+                if self.sessions.get(server) is actor:
+                    self.sessions.pop(server, None)
+                    self.catalog.pop(server, None)
+            actor = UpstreamSession(
+                lambda: self.connect(server), self.dispatch, disconnected)
+            self.sessions[server] = actor
+        return await self.sessions[server].request(server,method,tool,arguments)
+
+    async def aclose(self):
+        self.closed=True
+        tasks=[actor.task for actor in self.sessions.values()]
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks,return_exceptions=True)
+        self.sessions.clear()
+        self.catalog.clear()
+
+    async def dispatch(self,session,server,method,tool,arguments):
+        if method=="list":
+            result=(await session.list_tools()).model_dump(mode="json",by_alias=True)
+            found=list(result["tools"])
+            while result.get("nextCursor"):
+                from mcp import types
+                result=(await session.list_tools(params=types.PaginatedRequestParams(cursor=result["nextCursor"]))).model_dump(mode="json",by_alias=True)
+                found.extend(result["tools"])
+            allowed={item["name"]:item for item in found if allowed_tool(item,server)}
+            self.catalog[server]=allowed
+            return [{"name":item["name"],"description":item.get("description"),"parameters":item["inputSchema"]} for item in allowed.values()]
+        if tool not in self.catalog.get(server,{}):
+            raise ConnectionError("Upstream session changed. Rediscover this service.")
+        result=await session.call_tool(tool,arguments)
+        value=result.model_dump(mode="json",by_alias=True,exclude_none=True)
+        if value.get("isError"):
+            return {"ok":False,"error":str(value.get("content",[]))[:6000]}
+        raw=json.dumps(value,ensure_ascii=False)
+        if len(raw.encode())>80000:
+            return self.paged_result(raw)
+        return {"ok":True,"result":value}
+
+    @asynccontextmanager
+    async def connect(self,server):
+        from mcp import ClientSession, StdioServerParameters
+        from mcp.client.stdio import stdio_client
+        from mcp.client.streamable_http import streamable_http_client
         cfg=self.connections[server]
-        async def run(session):
-            await session.initialize()
-            if method=="list":
-                result=(await session.list_tools()).model_dump(mode="json",by_alias=True)
-                found=list(result["tools"])
-                while result.get("nextCursor"):
-                    from mcp import types
-                    result=(await session.list_tools(params=types.PaginatedRequestParams(cursor=result["nextCursor"]))).model_dump(mode="json",by_alias=True)
-                    found.extend(result["tools"])
-                allowed={item["name"]:item for item in found if allowed_tool(item)}
-                self.catalog[server]=allowed
-                return [{"name":item["name"],"description":item.get("description"),"parameters":item["inputSchema"]} for item in allowed.values()]
-            result=await session.call_tool(tool,arguments)
-            value=result.model_dump(mode="json",by_alias=True,exclude_none=True)
-            if value.get("isError"):
-                return {"ok":False,"error":str(value.get("content",[]))[:6000]}
-            raw=json.dumps(value,ensure_ascii=False)
-            if len(raw.encode())>80000:
-                return self.paged_result(raw)
-            return {"ok":True,"result":value}
         if "command" in cfg:
             env={k:os.environ[k] for k in cfg.get("env_vars",[]) if k in os.environ}
             env.update(cfg.get("env",{}))
@@ -129,13 +223,14 @@ class AgentTools:
             params=StdioServerParameters(command=cfg["command"],args=cfg.get("args",[]),cwd=cfg.get("cwd"),env=env)
             with open(os.devnull,"w") as quiet:
                 async with stdio_client(params,errlog=quiet) as (reader,writer), ClientSession(reader,writer) as session:
-                    return await run(session)
+                    yield session
+            return
         headers=dict(cfg.get("http_headers",{}))
         headers.update({k:os.environ[v] for k,v in cfg.get("env_http_headers",{}).items() if v in os.environ})
         token=cfg.get("bearer_token_env_var")
         if token and token in os.environ: headers["Authorization"]="Bearer "+os.environ[token]
         async with httpx2.AsyncClient(headers=headers, timeout=120) as client, streamable_http_client(cfg["url"],http_client=client) as (reader,writer,_), ClientSession(reader,writer) as session:
-            return await run(session)
+            yield session
 
     async def discover(self,server):
         return await asyncio.wait_for(self.upstream(server,"list"),90)
@@ -148,24 +243,52 @@ class AgentTools:
         self.results[result_id]=raw
         return self.read_result(result_id)
 
-    def read_result(self,result_id,offset=0):
+    def read_result(self,result_id,offset=0,query=None):
         if result_id not in getattr(self,"results",{}):
             raise ValueError("Use a result_id returned by a read in this execution.")
         text=self.results[result_id]
         if isinstance(offset,bool) or not isinstance(offset,int) or not 0<=offset<=len(text):
             raise ValueError("Invalid result offset.")
+        if query is not None:
+            if not isinstance(query,str) or not 1 <= len(query) <= 512:
+                raise ValueError("Use a literal search string of 1 to 512 characters.")
+            snippets=[]
+            total=used=0
+            next_offset=None
+            for match in re.finditer(re.escape(query),text,re.IGNORECASE):
+                total+=1
+                if match.start()<offset or next_offset is not None:
+                    continue
+                # Upstream JSON is often a single line. Bound context on both sides.
+                snippet=text[max(0,match.start()-100):match.end()+100]
+                if used+len(snippet)+bool(snippets)>16000:
+                    next_offset=match.start()
+                    continue
+                used+=len(snippet)+bool(snippets)
+                snippets.append(snippet)
+            return {"ok":True,"result_id":result_id,"total_matches":total,"offset":offset,
+                    "next_offset":next_offset,"text":"\n".join(snippets),"total_chars":len(text),
+                    "instruction":"For more matches use the same query and next_offset."}
         end=min(offset+16000,len(text))
         return {"ok":True,"result_id":result_id,"text":text[offset:end],"offset":offset,
                 "next_offset":end if end<len(text) else None,"total_chars":len(text),
-                "instruction":"Continue with read_result until next_offset is null; the upstream result is not truncated."}
+                "instruction":"Search this result with read_result(result_id, query=...) for the relevant values. Use next_offset for adjacent raw text only when needed."}
 
     async def read(self,server,tool,arguments):
         if server not in self.catalog: await self.discover(server)
+        if server not in self.catalog:
+            raise ConnectionError("Upstream disconnected during discovery.")
         descriptor=self.catalog[server].get(tool)
         if not descriptor: raise ValueError("This tool is not an approved read operation.")
         args=dict(arguments)
         props=descriptor["inputSchema"].get("properties",{})
         sql_operation=tool in SQL_TOOLS or (any(x in server.lower() for x in ("redshift","clickhouse","postgres","mysql")) and any(k in props for k in SQL_FIELDS))
+        if tool=="redshift_check_table":
+            # The upstream utility interpolates these as both SQL identifiers and literals.
+            for field in ("schema","table"):
+                value=args.get(field,"ods_10mins" if field=="schema" else None)
+                if not isinstance(value,str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*",value):
+                    raise ValueError("Use an unquoted schema and table identifier.")
         if tool=="run_soql_query":
             field=next((k for k in ("query","soql","soql_query") if k in args),None)
             if not field or not isinstance(args[field],str) or not re.match(r"^\s*SELECT\b",args[field],re.I) or ";" in args[field]:
@@ -173,7 +296,8 @@ class AgentTools:
         if sql_operation:
             field=next((k for k in SQL_FIELDS if k in args and isinstance(args[k],str)),None)
             if field is None: raise ValueError("A SELECT query is required.")
-            args[field]=readonly_sql(args[field],"clickhouse" if "clickhouse" in server else "redshift")
+            dialect="clickhouse" if "clickhouse" in server else "postgres" if "postgres" in server else "redshift"
+            args[field]=readonly_sql(args[field],dialect)
             props=descriptor["inputSchema"].get("properties",{})
             for key in ("max_rows","limit"):
                 if key in props: args[key]=min(int(args.get(key,200)),200)
@@ -241,8 +365,15 @@ class AgentTools:
                 self.standards = ReviewStandards(self.review.api, self.review.ROOT)
             packet["standards"] = self.standards.prepare(target, pr, packet)
             try:
-                packet['repository_knowledge']=self.knowledge(repo,pr['head']['sha'],
+                knowledge=self.knowledge(repo,pr['head']['sha'],
                     changed_paths=[f['filename'] for f in packet['file_manifest']],raw=True)
+                included={(d["path"],d["blob"]) for d in packet["standards"].get("documents",[]) if "text" in d}
+                docs=knowledge["documents"]
+                def in_standards(doc):
+                    return (doc["path"],doc.get("blob")) in included
+                packet["repository_knowledge"]={**knowledge,
+                    "documents":[d for d in docs if not in_standards(d)],
+                    "already_in_standards":[d["path"] for d in docs if in_standards(d)]}
             except Exception as error:
                 packet['repository_knowledge']={'repo':repo,'commit':pr['head']['sha'],
                     'error':str(error)[:600],'instruction':'Retry repository_knowledge or use github_read for project rules and relevant docs. This read failure does not revoke review permission.'}
@@ -355,11 +486,13 @@ class AgentTools:
     def submit(self,target,head,decision,summary,details,standards=None):
         state=self.may_vote(target)
         if decision not in ("APPROVE", "REQUEST_CHANGES", "COMMENT"):
-            raise ValueError("Choose APPROVE, REQUEST_CHANGES, or COMMENT with the specific remaining evidence gap.")
+            raise ValueError("Choose APPROVE, REQUEST_CHANGES, or COMMENT.")
         if target not in self.packets: raise ValueError("Read the complete review context first.")
         pr,packet=self.packets[target]
         if head!=pr["head"]["sha"]: raise ValueError("The verdict must identify the reviewed commit.")
-        # A documented evidence gap must not consume the authorization or write
+        if pr.get("draft") and decision!="COMMENT":
+            self.review.require_open_review(pr,decision=decision)
+        # A review comment must not consume the authorization or write
         # identity used by a later final verdict on this same head.
         if decision=="COMMENT": state += "-comment-" + head
         if decision=="APPROVE":
@@ -374,7 +507,7 @@ class AgentTools:
                         "missing_count":len(required),"missing":required[:30]}
         repo,num=target.rsplit("/pull/",1)
         endpoint=f"repos/{repo}/pulls/{num}"
-        latest=self.review.snapshot(repo,int(num))
+        latest=self.review.snapshot(repo,int(num),decision=decision)
         self.review.require_revision(self.review.revision(pr),latest)
         with closing(sqlite3.connect(self.review.ROOT/"reviews.sqlite",timeout=15)) as db:
             db.execute("create table if not exists jobs(id text primary key,base text,head text,started integer,attempting integer default 0)")

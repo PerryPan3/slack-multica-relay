@@ -50,10 +50,13 @@ class MaterialTests(unittest.TestCase):
         self.assertEqual(reader.missing(t),[])
 
     def test_large_material_and_member_can_be_paged_without_skipping_evidence(self):
-        reader,t,_,_=self.setup_review(archive({'flow':'a'*(PAGE*3)}),text='diff'*(PAGE))
+        reader,t,pr,packet=self.setup_review(archive({'flow':'a'*(PAGE*3)}),text='diff'*(PAGE))
         self.assertTrue(any(x.get('material') for x in reader.missing(t)))
-        page=reader.page(t,0)
+        page=reader.register(t,pr,packet)
+        self.assertIn(f"offset={PAGE}",page['instruction'])
+        self.assertNotIn('offset=0',page['instruction'])
         while page['next_offset'] is not None:page=reader.page(t,page['next_offset'])
+        self.assertIn('All material pages have been read',page['instruction'])
         reader.inspect(t,'flow.tfl')
         reader.inspect(t,'flow.tfl',members=['flow'],offset=PAGE)
         self.assertTrue(reader.missing(t))
@@ -61,6 +64,13 @@ class MaterialTests(unittest.TestCase):
         while page['next_offset'] is not None:
             page=reader.inspect(t,'flow.tfl',members=['flow'],offset=page['next_offset'])
         self.assertEqual(reader.missing(t),[])
+
+    def test_first_page_exposes_draft_even_if_description_occupies_the_page(self):
+        reader,target,pr,packet=self.setup_review(b"file",text="x"*(PAGE+1))
+        page=reader.register(target,{**pr,"draft":True},packet)
+        self.assertTrue(page["draft"])
+        self.assertEqual(page["next_offset"],PAGE)
+        self.assertFalse(reader.register(target,pr,packet)["draft"])
 
     def test_modified_archive_requires_both_pinned_versions_and_new_head_resets_reads(self):
         reader,t,pr,packet=self.setup_review(b'new',status='modified',old=b'old')

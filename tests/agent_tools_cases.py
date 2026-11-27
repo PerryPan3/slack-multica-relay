@@ -44,6 +44,15 @@ class NativeToolsTests(unittest.TestCase):
         result=agent.context('team/repo/pull/1')
         agent.knowledge.assert_called_with('team/repo','a'*40,changed_paths=['models/model.sql'],raw=True)
         self.assertEqual(result['repository_knowledge']['documents'][0]['text'],'Project rule')
+        agent.standards.prepare.return_value={"documents":[
+            {"path":"CLAUDE.md","blob":"same","text":"Project rule"},
+            {"path":"docs/base.md","blob":"old","same_as_head":True}]}
+        agent.knowledge.return_value={"documents":[{"path":"CLAUDE.md","blob":"same","text":"Project rule"},
+            {"path":"docs/base.md","blob":"old","text":"Keep me"},
+            {"path":"other.md","blob":"same","text":"Project rule"}]}
+        knowledge=agent.context('team/repo/pull/1')['repository_knowledge']
+        self.assertEqual(knowledge['already_in_standards'],['CLAUDE.md'])
+        self.assertEqual([d['path'] for d in knowledge['documents']],['docs/base.md','other.md'])
         agent.knowledge.side_effect=RuntimeError('HTTP 403')
         result=agent.context('team/repo/pull/1')
         self.assertIn('HTTP 403',result['repository_knowledge']['error'])
@@ -58,6 +67,36 @@ class NativeToolsTests(unittest.TestCase):
             page=agent.read_result(page['result_id'],page['next_offset']);parts.append(page['text'])
         self.assertEqual(''.join(parts),original)
         with self.assertRaises(ValueError):agent.read_result('another-request')
+
+    def test_result_search_handles_single_line_json_limits_and_literal_offsets(self):
+        agent=AgentTools.__new__(AgentTools)
+        raw="中"*16001+("Dag[2]."*2000)+"tail"
+        result=agent.paged_result(raw)
+        offset=0
+        found=0
+        while offset is not None:
+            page=agent.read_result(result["result_id"],offset,"dAG[2].")
+            self.assertEqual(page["total_matches"],2000)
+            self.assertLessEqual(len(page["text"]),16000)
+            found+=len(page["text"].splitlines())
+            offset=page["next_offset"]
+        self.assertEqual(found,2000)
+        empty=agent.read_result(result["result_id"],query="not present")
+        self.assertEqual((empty["total_matches"],empty["text"],empty["next_offset"]),(0,"",None))
+        for offset,query in ((False,"x"),(len(raw)+1,"x"),(0,""),(0,2)):
+            with self.assertRaises(ValueError): agent.read_result(result["result_id"],offset,query)
+
+    def test_readonly_function_allowlist(self):
+        for expr in ("format_type(id, mod)","has_table_privilege('r','t','select')","pg_get_viewdef(id)",
+                     "regexp_count(name,'a')","split_part(name,'-',1)","isnull(a,0)","btrim(name)",
+                     "json_array_length(meta)","octet_length(name)","version()"):
+            with self.subTest(expr=expr): self.assertIn("LIMIT 200",readonly_sql("select "+expr+" from t"))
+        self.assertIn("LIMIT 200",readonly_sql("select format_type(1,2)","postgres"))
+        for dialect,expr in (("redshift","my_udf()"),("redshift","dblink()"),("redshift","pg_read_file('x')"),
+                             ("redshift","set_config('a','b',false)"),("redshift","untrusted.format_type(1,2)"),
+                             ("redshift",'"FORMAT_TYPE"(1,2)'),("clickhouse","format_type(1,2)")):
+            with self.subTest(expr=expr),self.assertRaises(ValueError):readonly_sql("select "+expr,dialect)
+        self.assertIn("LIMIT 200",readonly_sql("select dateDiff('day',a,b) from t","clickhouse"))
 
     def test_unread_archive_blocks_approve_but_completed_evidence_reaches_submission(self):
         from types import SimpleNamespace
@@ -109,7 +148,7 @@ class NativeToolsTests(unittest.TestCase):
             (folder/'helper').chmod(0o700)
             agent=AgentTools.__new__(AgentTools)
             agent.connections={'fixture':{'command':str(folder/'launcher'),'env':{'PATH':str(folder)}}}
-            agent.claim={'local':True};agent.catalog={}
+            agent.claim={'local':True};agent.catalog={};agent.sessions={};agent.closed=False
             @asynccontextmanager
             async def transport(params,**kwargs):
                 subprocess.run(['/usr/bin/env','helper'],env=params.env,check=True,capture_output=True)
@@ -222,7 +261,15 @@ class NativeToolsTests(unittest.TestCase):
             return "relay-review/2 "+body+".signature"
         with tempfile.TemporaryDirectory() as temp:
             agent.review=SimpleNamespace(ROOT=Path(temp),snapshot=Mock(return_value=pr),revision=lambda p:[p["base"]["sha"],p["head"]["sha"]],require_revision=Mock(),finish=Mock(side_effect=response))
+            pr["draft"]=True
+            agent.review.require_open_review=Mock(side_effect=ValueError("draft accepts only COMMENT"))
+            for decision in ("APPROVE","REQUEST_CHANGES"):
+                with self.assertRaisesRegex(ValueError,"only COMMENT"):
+                    agent.submit(target,"head",decision,"checked","findings")
+            agent.review.snapshot.assert_not_called()
             agent.submit(target,"head","COMMENT","Evidence gap","Need current compiled output")
+            agent.review.snapshot.assert_called_with("team/repo",696,decision="COMMENT")
+            pr["draft"]=False
             self.assertEqual(agent.review.finish.call_args.args[4],"stable-task-comment-head")
             agent.tasks.complete.assert_not_called()
             agent.materials.missing.return_value=[]
@@ -370,6 +417,127 @@ class NativeToolsTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 agent.may_vote("team/repo/pull/1")
 
+class InstalledCheckerTests(unittest.TestCase):
+    def test_incremental_relation_and_template_limitations(self):
+        import hashlib,json,types
+        root=Path(__file__).resolve().parents[1]/".private/runtime/review"
+        policy=root/"standards.json"
+        if not policy.exists():
+            self.skipTest("Private review policy is not installed.")
+        entry=json.loads(policy.read_text())["repositories"]["moegolibrary/moego-dbt-dw"]["checker"]
+        checker=root/entry["file"]
+        raw=checker.read_bytes()
+        self.assertEqual(hashlib.sha256(raw).hexdigest(),entry["sha256"])
+        module=types.ModuleType("review_contracts")
+        exec(compile(raw,str(checker),"exec"),module.__dict__)
+        path="models/ods_10mins/events_hi.sql"
+        schema='{"models":[{"name":"events_hi","columns":[{"name":"id","description":"Event identifier"}]}]}'
+        config="{{ config(materialized='incremental') }}"
+        sql=("select id from {{ ref('events') }} {% if is_incremental() %}"
+             "where id > (select max(id) from {{ this }}) {% endif %}")
+        def check(query):
+            files={path:config+query,"models/ods_10mins/schema.yml":schema}
+            return module.check_change({},files,[path])
+        self.assertEqual(check(sql)["status"],"pass")
+        self.assertEqual(module.render("{{ this.database }}.{{ this.schema }}.{{ this.identifier }}",True)[0],
+                         "review_database.review_schema.review_relation")
+        for query in ("select {{ project_macro() }} as id","select {% for x in [1] %}{{ x }}{% endfor %} as id"):
+            result=check(query)
+            self.assertEqual(result["status"],"incomplete")
+            self.assertEqual({f["code"] for f in result["findings"]},{"unsupported_template"})
+        error=check("select {{ unknown_value }} as id")
+        self.assertEqual(error["status"],"incomplete")
+        self.assertNotIn("code",error["findings"][0])
+
+
+class UpstreamLifecycleTests(unittest.IsolatedAsyncioTestCase):
+    async def test_state_survives_calls_and_disconnect_reconnects_without_table_grants(self):
+        import asyncio,json,os
+        from agent_runtime import build_server
+        agent=AgentTools.__new__(AgentTools)
+        agent.sessions={};agent.closed=False;agent.catalog={};agent.counts={};agent.claim={"review":True}
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder)
+            fixture=root/"fixture.py"
+            fixture.write_text('''import os
+from pathlib import Path
+from mcp.server.mcpserver import MCPServer
+
+server=MCPServer("fixture")
+checked=set()
+pid=os.getpid()
+with Path("pids").open("a") as log:
+    print(pid,file=log)
+
+@server.tool()
+def redshift_check_table(table:str, schema:str="ods_10mins")->str:
+    checked.add(table)
+    return "verified"
+
+@server.tool()
+def redshift_query(sql:str, database:str, cluster_identifier:str)->str:
+    return "checked-result" if "sales" in checked else "no-table-grant"
+
+@server.tool()
+def get_pid()->int:
+    if Path("disconnect").exists():
+        Path("disconnect").unlink()
+        os._exit(0)
+    return pid
+
+server.run()
+''')
+            agent.connections={"redshift":{"command":sys.executable,"args":[str(fixture)],"cwd":folder}}
+            gateway=build_server(agent,root/"audit")
+            async def call(tool,arguments):
+                result=await asyncio.wait_for(gateway.call_tool("read_tool",{
+                    "service":"redshift","tool":tool,"arguments":arguments}),12)
+                return json.dumps(result.model_dump(mode="json",by_alias=True))
+            query={"sql":"select id from sales","database":"warehouse","cluster_identifier":"fixture"}
+            try:
+                self.assertIn("no-table-grant",await call("redshift_query",query))
+                self.assertIn("verified",await call("redshift_check_table",{"table":"sales"}))
+                self.assertIn("checked-result",await call("redshift_query",query))
+                self.assertIn("identifier",await call("redshift_check_table",{"table":"bad name"}))
+                first=(root/"pids").read_text().splitlines()
+                self.assertEqual(len(first),1)
+                (root/"disconnect").touch()
+                result=await call("get_pid",{})
+                pids=(root/"pids").read_text().splitlines()
+                self.assertEqual(len(pids),2,result)
+                self.assertIn(pids[-1],result)
+                self.assertIn("no-table-grant",await call("redshift_query",query))
+            finally:
+                await agent.aclose()
+            self.assertFalse(agent.sessions)
+            for pid in (root/"pids").read_text().splitlines():
+                with self.assertRaises(ProcessLookupError):os.kill(int(pid),0)
+            with self.assertRaisesRegex(RuntimeError,"closed"):await agent.discover("redshift")
+
+    async def test_shutdown_releases_active_and_queued_waiters_in_transport_owner(self):
+        import asyncio
+        from contextlib import asynccontextmanager
+        from unittest.mock import AsyncMock
+        from agent_tools import UpstreamSession
+        entered=asyncio.Event()
+        owners=[]
+        @asynccontextmanager
+        async def connect():
+            owners.append(asyncio.current_task())
+            try:yield AsyncMock()
+            finally:owners.append(asyncio.current_task())
+        async def dispatch(*args):
+            entered.set()
+            await asyncio.Event().wait()
+        actor=UpstreamSession(connect,dispatch,lambda:None)
+        calls=[asyncio.create_task(actor.request()) for _ in range(2)]
+        await asyncio.wait_for(entered.wait(),1)
+        actor.task.cancel()
+        results=await asyncio.wait_for(asyncio.gather(*calls,return_exceptions=True),1)
+        self.assertTrue(all(isinstance(err,ConnectionError) for err in results))
+        self.assertEqual(owners,[actor.task,actor.task])
+
+
 class NativeSessionTests(unittest.TestCase):
     def test_missing_end_record_does_not_block_followup_or_claim_no_side_effects(self):
         from agent_runtime import prior_execution,save_execution
@@ -402,7 +570,8 @@ class NativeSessionTests(unittest.TestCase):
                 return {'event':e,'ticket':t},c
             first,claim=request(time.time());second,nextclaim=request(time.time()+1)
             def operations(args,key,directory):
-                return SimpleNamespace(claim=claim if args==first else nextclaim,counts={},receipts=[],
+                from unittest.mock import AsyncMock
+                return SimpleNamespace(aclose=AsyncMock(),claim=claim if args==first else nextclaim,counts={},receipts=[],
                     prepare_reviews=lambda:{'continue_to_verdict':[]},services=lambda:[])
             calls=[]
             def model(command,**kwargs):
