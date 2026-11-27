@@ -96,21 +96,21 @@ def api(path, *, pages=False, diff=False, write=None):
     return [r for page in rows for r in page] if pages else rows
 
 
-def snapshot(repo, number, *, read_only=False):
+def snapshot(repo, number, *, read_only=False, decision=None):
     if api("user")["login"].lower() != LOGIN.lower():
         raise Stop("本机 GitHub 登录身份已改变。")
     pr = api(f"repos/{repo}/pulls/{number}")
     if not read_only:
-        require_open_review(pr)
+        require_open_review(pr, decision=decision)
     return pr
 
 
-def require_open_review(pr):
-    if pr["state"] != "open":
+def require_open_review(pr, *, decision=None):
+    if pr["state"] != "open" or pr.get("merged_at"):
         reason = "已合并" if pr.get("merged_at") else "已关闭"
         raise Stop(f"PR {reason}，无法再提交正式审批。")
-    if pr["draft"]:
-        raise Stop("PR 仍为草稿，无法提交正式审批。")
+    if pr["draft"] and decision != "COMMENT":
+        raise Stop("草稿 PR 仅接受 COMMENT。转为待审后才能提交 APPROVE 或 REQUEST_CHANGES。")
     if pr["user"]["login"].lower() == LOGIN.lower():
         raise Stop("审查账号是此 PR 的作者，无法审批自己的代码。")
 
@@ -163,7 +163,7 @@ def collect(endpoint, pr, *, native=False):
     conversation = api(endpoint.replace('/pulls/','/issues/') + "/comments?per_page=100", pages=True)
     notes = [{k:r.get(k) for k in ("state","body","commit_id","html_url")} | {"author":r["user"]["login"]} for r in reviews if r.get("body") or r.get("state") in ("APPROVED","CHANGES_REQUESTED","DISMISSED")]
     comments = [{k:r.get(k) for k in ("id","path","line","original_line","body","in_reply_to_id","commit_id","original_commit_id","html_url")} for r in inline]
-    packet = {"title":pr["title"], "description":pr["body"], "state":pr["state"], "merged_at":pr.get("merged_at"), "base_head":revision(pr), "previous_reviews":notes,
+    packet = {"title":pr["title"], "description":pr["body"], "state":pr["state"], "draft":bool(pr.get("draft")), "merged_at":pr.get("merged_at"), "base_head":revision(pr), "previous_reviews":notes,
               "inline_discussion":comments, "full_diff":patch,
               "conversation":[{k:r.get(k) for k in ("id","body","created_at","updated_at","html_url")} |
                               {"author":r.get("user",{}).get("login")} for r in conversation]}
@@ -281,6 +281,7 @@ def finish(repo, number, endpoint, pr, state, ticket, output, db, history=(), po
     states = {"APPROVE":"APPROVED", "REQUEST_CHANGES":"CHANGES_REQUESTED", "COMMENT":"COMMENTED"}
     if decision not in states:
         raise Stop("Agent 未给出明确的审查决定。")
+    require_open_review(pr, decision=decision)
     if decision == "APPROVE" and (not isinstance(verified_standards, dict)
             or verified_standards.get("ok") is not True
             or verified_standards.get("base_head") != list(row[:2])):
@@ -308,7 +309,7 @@ def finish(repo, number, endpoint, pr, state, ticket, output, db, history=(), po
                 db.commit()
         if row[3] and not saved:
             raise Stop("GitHub 上次提交结果待核对，已阻止重复审批。")
-        require_revision(revision(pr), snapshot(repo,number))
+        require_revision(revision(pr), snapshot(repo,number,decision=decision))
         if not saved:
             if db.execute("update jobs set attempting=1 where id=? and attempting=0",(state,)).rowcount != 1:
                 raise Stop("同一请求已有审批在处理，请稍后核对 GitHub。")
@@ -325,7 +326,7 @@ def finish(repo, number, endpoint, pr, state, ticket, output, db, history=(), po
         if (draft["state"] != "PENDING" or draft["commit_id"] != row[1] or
                 draft["user"]["login"].lower() != LOGIN.lower() or (draft.get("body") or "").strip() not in ("",marker) or api(review_path + "/comments")):
             raise Stop("GitHub 审批草稿已变化，未提交。")
-        require_revision(revision(pr), snapshot(repo,number))
+        require_revision(revision(pr), snapshot(repo,number,decision=decision))
         try:
             api(review_path + "/events",write={"event":decision,"body":review_body+"\n\n"+marker})
         except (Stop,subprocess.TimeoutExpired):
@@ -403,7 +404,7 @@ def run_review(stage,args,repo,number,options):
     started = int(time.time())
     ticket = args["ticket"]
     endpoint = f"repos/{repo}/pulls/{number}"
-    pr = snapshot(repo,number,read_only=stage == "prepare" or options["mode"] == "inspect")
+    pr = snapshot(repo,number,read_only=True)
     state = hashlib.sha256((ticket + options.get("job_scope","")).encode()).hexdigest()
     with sqlite3.connect(ROOT/"reviews.sqlite",timeout=15) as db:
         db.execute("create table if not exists jobs(id text primary key,base text,head text,started integer,attempting integer default 0)")
@@ -423,7 +424,7 @@ def run_review(stage,args,repo,number,options):
             started = int(time.time())
             try:
                 if options["mode"] != "inspect":
-                    require_open_review(pr)
+                    require_open_review(pr, decision="COMMENT")
                 return {"prompt":prepare(repo,number,endpoint,pr,state,db,event["text"],context)}
             except (Stop, subprocess.TimeoutExpired) as error:
                 reason = "读取 GitHub 超时。" if isinstance(error,subprocess.TimeoutExpired) else str(error)
@@ -484,7 +485,7 @@ def complete_review(args,repo,number,endpoint,pr,state,ticket,db,context,thread_
                     answer,_ = evidence.resolve(repo,packet,first,policy,evidence_history=round_history)
                 finally:
                     history.extend(round_history)
-                final_pr = snapshot(repo,number,read_only=inspect)
+                final_pr = snapshot(repo,number,read_only=True)
                 require_revision(revision(pr), final_pr)
                 reply = finish(repo,number,endpoint,final_pr,active,ticket,json.dumps(answer,ensure_ascii=False),db,
                                history,policy,prior_calls,mode=context["request_mode"])

@@ -176,6 +176,15 @@ class ProcessRecoveryTests(unittest.TestCase):
                     runtime.run_model(command,input='',text=True,stdout=out,stderr=err,cwd=root,env={},timeout=3)
                 self.assertLess(time.monotonic()-started,2)
 
+    def test_default_review_model_and_result_search_schema(self):
+        with tempfile.TemporaryDirectory() as folder,patch.object(runtime.review_evidence,"PRIVATE",Path(folder)):
+            self.assertEqual(runtime.model_settings(),{"model":"gpt-6.2-astra","model_reasoning_effort":"high","service_tier":"default"})
+            ops=SimpleNamespace(claim={},read_result=Mock(return_value={"ok":True,"total_matches":2}))
+            gateway=runtime.build_server(ops,Path(folder)/"audit")
+            result=asyncio.run(gateway.call_tool("read_result",{"result_id":"buffer","query":"task"}))
+            self.assertFalse(result.is_error)
+            ops.read_result.assert_called_once_with("buffer",0,"task")
+
     def test_runtime_uses_private_model_even_when_desktop_changes(self):
         with tempfile.TemporaryDirectory() as folder:
             root=Path(folder);(root/'.codex').mkdir()
@@ -403,7 +412,7 @@ class GatewayRecoveryTests(unittest.TestCase):
         encoded='iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aYioAAAAASUVORK5CYII='
         image={'ok':True,'path':'flowGraphImage.png','image':{'mimeType':'image/png','data':encoded}}
         plain={'ok':True,'text':'query source','next_offset':None}
-        operations=SimpleNamespace(claim={},artifact=Mock(side_effect=[image,plain]))
+        operations=SimpleNamespace(claim={},aclose=AsyncMock(),artifact=Mock(side_effect=[image,plain]))
         async def read(port,nonce):
             async with create_mcp_http_client(headers={'Authorization':'Bearer '+nonce}) as http:
                 async with streamable_http_client(f'http://127.0.0.1:{port}/mcp',http_client=http) as streams:
@@ -415,6 +424,7 @@ class GatewayRecoveryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             with runtime.running_gateway(operations,Path(folder)/'audit') as (port,nonce):
                 picture,text=asyncio.run(read(port,nonce))
+        operations.aclose.assert_awaited_once()
         self.assertFalse(picture.is_error)
         self.assertIsInstance(picture.content[0],TextContent)
         self.assertNotIn(encoded,picture.content[0].text)
@@ -493,12 +503,20 @@ class GatewayRecoveryTests(unittest.TestCase):
         self.assertFalse(result.get('isError',False))
         operations.submit.assert_called_once()
 
+    def test_gateway_closes_upstreams_on_interruption(self):
+        operations=SimpleNamespace(claim={},aclose=AsyncMock())
+        with tempfile.TemporaryDirectory() as folder,self.assertRaises(runtime.RuntimeInterrupted):
+            with runtime.running_gateway(operations,Path(folder)/"audit"):
+                raise runtime.RuntimeInterrupted(signal.SIGTERM)
+        operations.aclose.assert_awaited_once()
+
     def test_gateway_stops_after_setup_exception(self):
-        operations=SimpleNamespace(claim={})
+        operations=SimpleNamespace(claim={},aclose=AsyncMock())
         with tempfile.TemporaryDirectory() as folder:
             with self.assertRaisesRegex(RuntimeError,'setup failure'):
                 with runtime.running_gateway(operations,Path(folder)/'audit') as (port,_):
                     raise RuntimeError('setup failure')
+            operations.aclose.assert_awaited_once()
             import socket
             connection=socket.socket();connection.settimeout(.2)
             try:self.assertNotEqual(connection.connect_ex(('127.0.0.1',port)),0)

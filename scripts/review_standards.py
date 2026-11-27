@@ -129,7 +129,16 @@ class ReviewStandards:
 
     @staticmethod
     def public(state):
-        return {k: v for k, v in state.items() if k not in ("files", "changed")}
+        result = {k: v for k, v in state.items() if k not in ("files", "changed")}
+        heads = {(d["path"], d["blob"]) for d in state["documents"] if d["side"] == "head"}
+        documents = []
+        for doc in state["documents"]:
+            if doc["side"] == "base" and (doc["path"], doc["blob"]) in heads:
+                doc = {k: v for k, v in doc.items() if k != "text"}
+                doc["same_as_head"] = True
+            documents.append(doc)
+        result["documents"] = documents
+        return result
 
     def evaluate(self, target, revision, assessments=None):
         state = self.reviews.get(target)

@@ -52,6 +52,18 @@ class StandardsTests(unittest.TestCase):
         self.assertFalse(self.evaluate(entries)["ok"])
         self.assertTrue(self.evaluate(self.assessments())["ok"])
 
+    def test_public_projection_points_only_identical_base_blobs_to_head(self):
+        packet = self.gate.prepare(self.target, self.pr, self.packet)
+        base, head = packet["documents"]
+        self.assertTrue(base["same_as_head"])
+        self.assertNotIn("text", base)
+        self.assertEqual(head["text"], self.files["CLAUDE.md"])
+        self.assertTrue(self.evaluate(self.assessments())["ok"])
+        changed = dict(base, text="Old rule with different text", blob="c"*40)
+        del changed["same_as_head"]
+        state = {"documents":[changed, head]}
+        self.assertEqual(self.gate.public(state)["documents"], [changed, head])
+
     def test_stale_revision_and_policy_are_rejected(self):
         self.gate.prepare(self.target, self.pr, self.packet)
         self.assertFalse(self.evaluate(self.assessments(), head="c" * 40)["ok"])

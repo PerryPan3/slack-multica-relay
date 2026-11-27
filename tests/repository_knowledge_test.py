@@ -36,6 +36,13 @@ class KnowledgeTests(unittest.TestCase):
         next_page=reader.read('team/repo',first['commit'],['docs/joins.md'])
         self.assertIn('Join at invoice grain.',[d['text'] for d in next_page['documents']])
         self.assertEqual(sum('/git/trees/' in c for c in calls),1)
+        self.assertEqual([d['path'] for d in next_page['documents']],['docs/joins.md'])
+        self.assertNotIn('knowledge_paths',next_page)
+        self.assertIn('knowledge_paths',reader.read('team/repo',first['commit']))
+        self.assertIn('knowledge_paths',reader.read('team/repo','b'*40,['docs/joins.md']))
+        self.assertIn('knowledge_paths',reader.read('team/other',first['commit'],['docs/joins.md']))
+        nested=reader.read('team/repo',first['commit'],['models/AGENTS.md'])
+        self.assertEqual(nested['entry_paths_to_read'],['models/AGENTS.override.md'])
 
     def test_review_uses_exact_head_and_nested_override(self):
         reader,calls=self.fixture()

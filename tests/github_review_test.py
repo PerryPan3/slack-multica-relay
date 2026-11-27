@@ -24,6 +24,9 @@ class ApprovalTests(unittest.TestCase):
         with patch.object(review,"api",side_effect=read):
             packet=review.collect('repos/team/repo/pulls/19',pr)
         self.assertEqual(packet['conversation'][0]['body'],'The previous assumption was wrong')
+        self.assertFalse(packet['draft'])
+        with patch.object(review,"api",side_effect=read):
+            self.assertTrue(review.collect('repos/team/repo/pulls/19',{**pr,"draft":True},native=True)['draft'])
 
     def test_missing_resource_does_not_claim_missing_repository_permission(self):
         from types import SimpleNamespace
@@ -35,7 +38,7 @@ class ApprovalTests(unittest.TestCase):
         identity = patch.object(review,"LOGIN","test-reviewer")
         identity.start()
         self.addCleanup(identity.stop)
-        self.pr = {"node_id":"node","base":{"sha":"base"},"head":{"sha":"head"}}
+        self.pr = {"node_id":"node","state":"open","draft":False,"user":{"login":"author"},"base":{"sha":"base"},"head":{"sha":"head"}}
         self.db = sqlite3.connect(":memory:")
         self.addCleanup(self.db.close)
         self.db.execute("create table jobs(id text,base text,head text,started integer,attempting integer)")
@@ -205,13 +208,44 @@ class ApprovalTests(unittest.TestCase):
         self.assertIsNone(receipt["review"])
         self.assertTrue(receipt["text"].startswith("暂缓审批"))
 
+    def test_write_eligibility_for_draft_closed_merged_and_own_pr(self):
+        for vote in ("COMMENT","REQUEST_CHANGES","APPROVE"):
+            with self.subTest(vote=vote):
+                draft={**self.pr,"draft":True}
+                if vote=="COMMENT":
+                    review.require_open_review(draft,decision=vote)
+                else:
+                    with self.assertRaisesRegex(review.Stop,"仅接受 COMMENT"):
+                        review.require_open_review(draft,decision=vote)
+                for change in ({"state":"closed"},{"merged_at":"now"},{"user":{"login":review.LOGIN}}):
+                    with self.assertRaises(review.Stop):
+                        review.require_open_review({**self.pr,**change},decision=vote)
+
+    def test_draft_or_close_transition_prevents_review_event(self):
+        pending={**self.record,"state":"PENDING","body":""}
+        for vote,change in (("REQUEST_CHANGES",{"draft":True}),("COMMENT",{"state":"closed"})):
+            self.db.execute("update jobs set attempting=0")
+            self.db.execute("drop table if exists pending_reviews")
+            self.verdict=json.dumps({"decision":vote,"summary":"review","details":"findings"})
+            snapshots=iter([self.pr,{**self.pr,**change}])
+            def api(path,**options):
+                if path=="user": return {"login":review.LOGIN}
+                if path=="repos/owner/repo/pulls/1": return next(snapshots)
+                if path.endswith("/events"):self.fail("posted after PR state changed")
+                if path.endswith("/comments") or "?" in path:return []
+                return pending
+            with patch.object(review,"api",side_effect=api),self.assertRaises(review.Stop):
+                self.finish()
+
     def test_comment_is_published_once_and_receipt_does_not_claim_approval(self):
         import base64
+        self.pr["draft"]=True
         self.verdict = json.dumps({"decision":"COMMENT", "summary":"待补充验证", "details":"已核对代码，缺少当前版本的运行产物以确认输出字段。"})
         self.record.update(state="COMMENTED", body="待补充验证\n<!-- perry-relay-review state -->")
         draft = {**self.record, "state":"PENDING", "body":""}
-        with patch.object(review,"KEY",b"key"), patch.object(review,"snapshot",return_value=self.pr), patch.object(review,"api",side_effect=[[],draft,draft,[],self.record,self.record,self.pr]) as api:
+        with patch.object(review,"KEY",b"key"), patch.object(review,"snapshot",return_value=self.pr) as snapshots, patch.object(review,"api",side_effect=[[],draft,draft,[],self.record,self.record,self.pr]) as api:
             result = self.finish()
+            self.assertEqual([call.kwargs for call in snapshots.call_args_list],[{"decision":"COMMENT"}]*2)
             self.assertEqual(api.call_args_list[4].kwargs["write"]["event"], "COMMENT")
         receipt = json.loads(base64.urlsafe_b64decode(result.split(" ",1)[1].split(".")[0]+"==="))
         self.assertEqual(receipt["status"],"COMMENT")

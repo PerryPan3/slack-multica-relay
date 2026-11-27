@@ -56,4 +56,9 @@ it("links a verified comment receipt without labeling it as approval",()=>{
   expect(result.repositoryLine).toContain("审查评论（未批准）");
   expect(result.repositoryLine).not.toContain("Approve");
   expect(reviewPresentation(sign({...value,review:null}),"ticket","key")).toBeUndefined();
+  expect(reviewPresentation(sign(value),"other-ticket","key")).toBeUndefined();
+  const body=Buffer.from(JSON.stringify({text:"Draft PR",seconds:25,tools:[],reviews:[sign(value)]})).toString("base64url");
+  const signature=createHmac("sha256","key").update("agent-result/1:ticket:"+body).digest("hex");
+  expect(reviewPresentation("relay-agent/1 "+body+"."+signature,"ticket","key")?.repositoryLine)
+    .toContain("pullrequestreview-123|审查评论（未批准）");
 });
