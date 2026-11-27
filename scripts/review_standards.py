@@ -3,6 +3,7 @@ import base64
 import hashlib
 import json
 from pathlib import Path
+import posixpath
 import types
 
 from review_materials import blob_digest
@@ -46,18 +47,43 @@ class ReviewStandards:
             snapshots = []
             trees = []
             blobs = {}
-            def read_blob(path, row):
-                if row.get("mode") == "120000" or row.get("size", 1048577) > 1048576:
+            def fetch_raw_blob(path, row, max_size=1048576):
+                if row.get("size", max_size + 1) > max_size:
                     raise ValueError(f"Cannot safely read {path}")
+                data = self.api(f"repos/{repo}/git/blobs/{row['sha']}")
+                if data.get("encoding") != "base64":
+                    raise ValueError(f"Expected text blob: {path}")
+                raw = base64.b64decode(data["content"])
+                if len(raw) > max_size or blob_digest(raw) != row["sha"]:
+                    raise ValueError(f"Unverified blob: {path}")
+                return raw
+
+            def resolve_blob(path, row, paths, depth=0):
+                if row.get("mode") == "120000":
+                    if depth >= 5:
+                        raise ValueError(f"Symlink depth exceeded: {path}")
+                    target = fetch_raw_blob(path, row, max_size=4096).decode("utf-8").strip()
+                    if not target or target.startswith("/") or "\\" in target:
+                        raise ValueError(f"Cannot safely read {path}")
+                    resolved = posixpath.normpath(posixpath.join(posixpath.dirname(path), target))
+                    if resolved in ("", ".") or resolved == ".." or resolved.startswith("../"):
+                        raise ValueError(f"Cannot safely read {path}")
+                    next_row = paths.get(resolved)
+                    if next_row is None:
+                        raise ValueError(f"Broken symlink: {path}")
+                    return resolve_blob(resolved, next_row, paths, depth + 1)
                 if row["sha"] not in blobs:
-                    data = self.api(f"repos/{repo}/git/blobs/{row['sha']}")
-                    if data.get("encoding") != "base64":
-                        raise ValueError(f"Expected text blob: {path}")
-                    raw = base64.b64decode(data["content"])
-                    if len(raw) > 1048576 or blob_digest(raw) != row["sha"]:
-                        raise ValueError(f"Unverified blob: {path}")
-                    blobs[row["sha"]] = raw.decode("utf-8")
-                return blobs[row["sha"]]
+                    raw = fetch_raw_blob(path, row, max_size=1048576)
+                    text = raw.decode("utf-8")
+                    if "\0" in text:
+                        raise UnicodeError("Binary blob")
+                    blobs[row["sha"]] = text
+                return blobs[row["sha"]], row["sha"], path
+
+            def read_blob(path, row, paths):
+                text, _sha, _resolved = resolve_blob(path, row, paths)
+                return text
+
             for side, sha in zip(("base", "head"), revision):
                 tree = self.api(f"repos/{repo}/git/trees/{sha}?recursive=1")
                 if tree.get("truncated"):
@@ -71,32 +97,50 @@ class ReviewStandards:
                         prefix = "" if str(parent) == "." else str(parent) + "/"
                         documents.update(prefix + f for f in ("AGENTS.override.md", "AGENTS.md", "CLAUDE.md")
                                          if prefix + f in paths)
-                required = set(checker.input_paths(changed, paths) if checker else [])
-                required = {p for p in required if not p.endswith(".sql") or p in changed}
-                required.update(p for p in changed if p in paths and p.endswith((".sql", ".py", ".ts", ".yml", ".yaml", ".md")))
-                required.update(documents)
+                checker_required = set(checker.input_paths(changed, paths) if checker else [])
+                checker_required = {p for p in checker_required if not p.endswith(".sql") or p in changed}
+                strict_paths = checker_required | documents
+                optional_changed = [p for p in sorted(set(changed)) if p in paths and p not in strict_paths]
                 files = {}
                 budget = 8 * 1024 * 1024
-                for path in sorted(required):
+                for path in sorted(strict_paths):
                     row = paths.get(path)
                     if row is None:
                         if path in documents:
                             raise ValueError(f"Required rule document missing at {side}: {path}")
                         continue
-                    files[path] = read_blob(path, row)
-                    budget -= len(files[path].encode())
+                    text, blob_sha, resolved_path = resolve_blob(path, row, paths)
+                    files[path] = text
+                    budget -= len(text.encode())
                     if budget < 0:
                         raise ValueError("Standards evidence exceeds the bounded reader capacity")
                     if path in documents:
-                        state["documents"].append({"side": side, "path": path, "commit": sha,
-                                                   "blob": row["sha"], "text": files[path]})
+                        doc = {"side": side, "path": path, "commit": sha,
+                               "blob": blob_sha, "text": text}
+                        if resolved_path != path:
+                            doc["symlink_target"] = resolved_path
+                        state["documents"].append(doc)
+                for path in optional_changed:
+                    row = paths[path]
+                    if row.get("size", 1048577) > 1048576 or row.get("mode") == "120000":
+                        continue
+                    try:
+                        text = read_blob(path, row, paths)
+                    except UnicodeError:
+                        # Binary changed assets (e.g. images) are inspected via review_artifact.
+                        continue
+                    size = len(text.encode())
+                    if budget - size < 0:
+                        continue
+                    files[path] = text
+                    budget -= size
                 snapshots.append(files)
             if checker:
                 selected = checker.affected_models(*snapshots, changed, set(trees[0]) | set(trees[1]))
                 for paths, files in zip(trees, snapshots):
                     for path in selected:
                         if path in paths and path not in files:
-                            files[path] = read_blob(path, paths[path])
+                            files[path] = read_blob(path, paths[path], paths)
             state["files"] = snapshots[1]
             if checker:
                 result = checker.check_change(*snapshots, changed)
@@ -131,11 +175,19 @@ class ReviewStandards:
     def public(state):
         result = {k: v for k, v in state.items() if k not in ("files", "changed")}
         heads = {(d["path"], d["blob"]) for d in state["documents"] if d["side"] == "head"}
+        seen_head_blobs = {}
         documents = []
         for doc in state["documents"]:
             if doc["side"] == "base" and (doc["path"], doc["blob"]) in heads:
                 doc = {k: v for k, v in doc.items() if k != "text"}
                 doc["same_as_head"] = True
+            elif doc["side"] == "head" and "text" in doc:
+                prior = seen_head_blobs.get(doc["blob"])
+                if prior is not None:
+                    doc = {k: v for k, v in doc.items() if k != "text"}
+                    doc["same_as_path"] = prior
+                else:
+                    seen_head_blobs[doc["blob"]] = doc["path"]
             documents.append(doc)
         result["documents"] = documents
         return result
@@ -190,7 +242,8 @@ class ReviewStandards:
                     errors.append(f"{ident}: evidence is not an exact quote from the pinned head")
             if not matched & rule_paths:
                 errors.append(f"{ident}: cite the applicable rule document")
-            if not matched & set(state["changed"]):
+            loaded_changed = set(state["changed"]) & set(state["files"])
+            if loaded_changed and not matched & loaded_changed:
                 errors.append(f"{ident}: cite the changed implementation")
             requirement = state["manual_rules"][ident]
             if isinstance(requirement, dict):
